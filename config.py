@@ -1,0 +1,214 @@
+"""Конфигурация бота. Все настройки берутся из .env (см. .env.example)."""
+import os
+import shutil
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# .env живёт рядом с config.py (в корне папки бота) — путь детерминированный,
+# не зависит от текущего каталога запуска.
+_ENV_PATH = str(Path(__file__).resolve().parent / ".env")
+
+load_dotenv(_ENV_PATH)
+
+# --- Версия (показывается в /start, /help, /апи и в логе при старте) ---
+APP_VERSION = "0.0.1-alpha"
+
+# --- Основное ---
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+DEFAULT_TZ = os.getenv("DEFAULT_TZ", "Europe/Moscow").strip()
+DB_PATH = os.getenv("DB_PATH", "data/fomo_timers.db").strip()
+
+# --- Автотрекинг через API игры (заполняется само, руками — только флаги) ---
+API_ENABLED = os.getenv("API_ENABLED", "false").strip().lower() == "true"
+# Полный адрес(а) эндпоинта состояния (можно несколько — через запятую)
+API_STATE_URL = os.getenv("API_STATE_URL", "").strip()
+API_AUTH_HEADER = os.getenv("API_AUTH_HEADER", "").strip()  # напр.: Authorization: Bearer eyJhbGci...
+# Метод и тело запроса (для POST-эндпоинтов со подписями — как у Fomo Fighters)
+API_METHOD = (os.getenv("API_METHOD", "GET").strip().upper() or "GET")
+API_BODY = os.getenv("API_BODY", "").strip()
+# Дополнительные заголовки JSON-словарём (подписи api-* и т.п.), напр.:
+#   {"api-key": "…", "api-hash": "…", "api-time": "…", "api-version": "…"}
+API_HEADERS_JSON = os.getenv("API_HEADERS_JSON", "").strip()
+API_POLL_INTERVAL = int(os.getenv("API_POLL_INTERVAL", "45"))
+# Ваш tg_id для автотрекинга (узнать: @userinfobot). Пусто — берётся первый /start боту.
+API_OWNER_TG_ID = int(os.getenv("API_OWNER_TG_ID", "0") or 0)
+# Спрашивать «Да/Нет» перед добавлением найденных таймеров. По умолчанию НЕТ —
+# ставим молча; переключить: команда /вопросы или кнопка на экране /апи
+API_ASK_BEFORE_ADD = os.getenv("API_ASK_BEFORE_ADD", "false").strip().lower() == "true"
+# Трассировка сырых ответов API в data/trace.log (поиск новых типов таймеров).
+# Переключается в боте: /трассировка, файл: /трейслог
+API_TRACE = os.getenv("API_TRACE", "false").strip().lower() == "true"
+# Папка, куда пользователь кидает .har / fomo.txt — бот сам разберёт и обновится
+TOKEN_UPDATES_DIR = "token_updates"
+
+# --- Нативный режим Fomo Fighters (бот сам подписывает и сам чинит ключ) ---
+# initData мини-аппа (urlencoded, из /telegram/auth в fomo.txt или от юзербота).
+# Есть это значение — подписи из HAR больше не нужны: всё считается само.
+FOMO_INIT_DATA = os.getenv("FOMO_INIT_DATA", "").strip()
+FOMO_API_BASE = os.getenv("FOMO_API_BASE", "https://api.fomofighters.xyz").strip().rstrip("/")
+FOMO_GAME_BOT = os.getenv("FOMO_GAME_BOT", "fomo_fighters_bot").strip()
+FOMO_APP_NAME = os.getenv("FOMO_APP_NAME", "game").strip()
+FOMO_LANG = os.getenv("FOMO_LANG", "ru").strip()
+FOMO_WEB_ORIGIN = os.getenv("FOMO_WEB_ORIGIN", "https://game.fomofighters.xyz").strip().rstrip("/")
+# Превентивная реанимация ключа (auth), секунд
+FOMO_REAUTH_INTERVAL = int(os.getenv("FOMO_REAUTH_INTERVAL", "21600") or 21600)
+
+# --- Юзербот (свежая initData автоматически, логин один раз через login_bot.bat) ---
+# По умолчанию — общедоступная пара Telegram Desktop; можно вписать свою из
+# my.telegram.org -> API development tools
+USERBOT_API_ID = int(os.getenv("USERBOT_API_ID", "6") or 6)
+USERBOT_API_HASH = os.getenv("USERBOT_API_HASH", "eb06d4abfb49dc3eeb1aeb98ae0f581e").strip()
+USERBOT_SESSION_PATH = os.getenv("USERBOT_SESSION_PATH", "userbot.session").strip()
+
+# --- Поведение напоминаний ---
+# T-1мин выключен выбором «Только T-0»; при желании включите в .env (WARN_ENABLED=true)
+WARN_ENABLED = os.getenv("WARN_ENABLED", "false").strip().lower() == "true"
+WARN_BEFORE_SEC = 60
+WARN_MIN_DURATION = 180
+
+# --- Ограничения таймеров ---
+MAX_TIMER_SEC = 10 * 24 * 3600   # 10 суток сверху
+MIN_TIMER_SEC = 10               # снизу
+
+# --- Кнопки быстрого таймера (секунды) ---
+QUICK_PRESETS = [300, 900, 1800, 2700, 3600, 7200, 14400, 28800, 43200, 86400]
+
+
+# ---------- Работа с .env ----------
+
+def env_get(key, default="", env_path=".env") -> str:
+    """Прочитать значение ключа прямо из файла .env, минуя память процесса.
+
+    Нужен, когда .env обновляется извне (login_userbot.py сохранил личные
+    api-ключи), а работающий процесс ещё не перечитывал конфиг.
+    """
+    try:
+        p = Path(env_path)
+        if not p.exists():
+            return default
+        for line in p.read_text(encoding="utf-8").splitlines():
+            s = line.strip()
+            if not s or s.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            if k.strip() == key:
+                return v.strip()
+    except Exception:
+        pass
+    return default
+
+
+def _update_env_keys(updates: dict, env_path=".env") -> bool:
+    """Записать значения ключей в .env, сохранив остальные строки и комментарии.
+
+    Файла нет -> создаётся из .env.example (если есть). Отсутствующие ключи
+    дописываются в конец. Возвращает True при успехе.
+    """
+    try:
+        env = Path(env_path)
+        if not env.exists():
+            example = env.parent / ".env.example"
+            if example.exists():
+                shutil.copyfile(example, env)
+        lines = env.read_text(encoding="utf-8").splitlines() if env.exists() else []
+        pending = {str(k): str(v) for k, v in updates.items()}
+        out = []
+        for line in lines:
+            stripped = line.strip()
+            key = line.split("=", 1)[0].strip() if "=" in line else ""
+            if key in pending and stripped and not stripped.startswith("#"):
+                out.append(f"{key}={pending.pop(key)}")
+            else:
+                out.append(line)
+        for key, val in pending.items():
+            out.append(f"{key}={val}")
+        env.write_text("\n".join(out) + "\n", encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def set_fomo_init_data(value: str, env_path=".env") -> bool:
+    """Сохранить свежую initData в .env (юзербот добыл новую — запомним)."""
+    global FOMO_INIT_DATA
+    FOMO_INIT_DATA = (value or "").strip()
+    return _update_env_keys({"FOMO_INIT_DATA": FOMO_INIT_DATA}, env_path)
+
+
+def set_userbot_api(api_id, api_hash, env_path=".env") -> bool:
+    """Сохранить личные api_id/api_hash юзербота в .env (после 403 RECAPTCHA
+    login_userbot.py вызывает это сам)."""
+    global USERBOT_API_ID, USERBOT_API_HASH
+    try:
+        USERBOT_API_ID = int(str(api_id).strip())
+    except (ValueError, TypeError):
+        return False
+    USERBOT_API_HASH = (api_hash or "").strip()
+    return _update_env_keys({"USERBOT_API_ID": str(USERBOT_API_ID),
+                             "USERBOT_API_HASH": USERBOT_API_HASH}, env_path)
+
+
+def set_ask_before_add(value: bool, env_path=".env") -> bool:
+    """Переключить режим подтверждения: True — список с кнопками Да/Нет,
+    False — ставить молча. Пишет в .env (команда /вопросы)."""
+    global API_ASK_BEFORE_ADD
+    API_ASK_BEFORE_ADD = bool(value)
+    return _update_env_keys({"API_ASK_BEFORE_ADD": "true" if API_ASK_BEFORE_ADD else "false"},
+                            env_path)
+
+
+def set_trace(value: bool, env_path=".env") -> bool:
+    """Вкл/выкл трассировку сырых ответов API (data/trace.log). /трассировка."""
+    global API_TRACE
+    API_TRACE = bool(value)
+    return _update_env_keys({"API_TRACE": "true" if API_TRACE else "false"}, env_path)
+
+
+def reload():
+    """Перечитать .env с диска (watcher обновил файл — подтягиваем без рестарта).
+
+    load_dotenv(override=True) заново читает файл и перезаписывает os.environ,
+    после чего os.getenv ниже отдаёт свежие значения. Без этого reload читал бы
+    только память процесса и «горячее» обновление не работало бы вовсе.
+    """
+    global API_ENABLED, API_STATE_URL, API_AUTH_HEADER, API_POLL_INTERVAL, API_OWNER_TG_ID
+    global API_ASK_BEFORE_ADD, API_METHOD, API_BODY, API_HEADERS_JSON, API_TRACE
+    global FOMO_INIT_DATA, FOMO_API_BASE, FOMO_GAME_BOT, FOMO_APP_NAME, FOMO_LANG, FOMO_REAUTH_INTERVAL
+    global FOMO_WEB_ORIGIN, USERBOT_API_ID, USERBOT_API_HASH, USERBOT_SESSION_PATH
+    try:
+        load_dotenv(_ENV_PATH, override=True)
+    except Exception:
+        pass
+    API_ENABLED = os.getenv("API_ENABLED", "false").strip().lower() == "true"
+    API_ASK_BEFORE_ADD = os.getenv("API_ASK_BEFORE_ADD", "false").strip().lower() == "true"
+    API_TRACE = os.getenv("API_TRACE", "false").strip().lower() == "true"
+    API_STATE_URL = os.getenv("API_STATE_URL", "").strip()
+    API_AUTH_HEADER = os.getenv("API_AUTH_HEADER", "").strip()
+    API_METHOD = (os.getenv("API_METHOD", "GET").strip().upper() or "GET")
+    API_BODY = os.getenv("API_BODY", "").strip()
+    API_HEADERS_JSON = os.getenv("API_HEADERS_JSON", "").strip()
+    try:
+        API_POLL_INTERVAL = int(os.getenv("API_POLL_INTERVAL", "45"))
+    except ValueError:
+        API_POLL_INTERVAL = 45
+    try:
+        API_OWNER_TG_ID = int(os.getenv("API_OWNER_TG_ID", "0") or 0)
+    except ValueError:
+        API_OWNER_TG_ID = 0
+    FOMO_INIT_DATA = os.getenv("FOMO_INIT_DATA", "").strip()
+    FOMO_API_BASE = os.getenv("FOMO_API_BASE", "https://api.fomofighters.xyz").strip().rstrip("/")
+    FOMO_GAME_BOT = os.getenv("FOMO_GAME_BOT", "fomo_fighters_bot").strip()
+    FOMO_APP_NAME = os.getenv("FOMO_APP_NAME", "game").strip()
+    FOMO_LANG = os.getenv("FOMO_LANG", "ru").strip()
+    FOMO_WEB_ORIGIN = os.getenv("FOMO_WEB_ORIGIN", "https://game.fomofighters.xyz").strip().rstrip("/")
+    try:
+        FOMO_REAUTH_INTERVAL = int(os.getenv("FOMO_REAUTH_INTERVAL", "21600") or 21600)
+    except ValueError:
+        FOMO_REAUTH_INTERVAL = 21600
+    try:
+        USERBOT_API_ID = int(os.getenv("USERBOT_API_ID", "6") or 6)
+    except ValueError:
+        USERBOT_API_ID = 6
+    USERBOT_API_HASH = os.getenv("USERBOT_API_HASH", "eb06d4abfb49dc3eeb1aeb98ae0f581e").strip()
+    USERBOT_SESSION_PATH = os.getenv("USERBOT_SESSION_PATH", "userbot.session").strip()

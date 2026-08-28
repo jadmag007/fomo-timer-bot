@@ -1,0 +1,5 @@
+# Зависимости бота
+aiogram>=3.15
+python-dotenv>=1.0
+tzdata>=2023.3
+telethon>=1.34
