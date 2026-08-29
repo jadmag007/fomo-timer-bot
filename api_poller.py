@@ -39,6 +39,7 @@ import aiohttp
 import config
 import db
 import fomo_client
+import pause_state
 import apitrace as trace_mod
 import translations as tr
 from tools import har_inspect
@@ -47,8 +48,36 @@ from util import fmt_clock, local_str, safe_tz
 log = logging.getLogger("api_poller")
 
 # Память о уже поставленных по API таймерах: {(label, минутный_бакет), ...}
-_SEEN = set()
-_SEEN_MAX = 20000
+_MAX_SEEN = 20000
+
+
+class _SeenSet(set):
+    """set с порядком вставки: при переполнении вытесняются СТАРЕЙШИЕ ключи.
+
+    Прежний вариант делал _SEEN.clear(): вместе с мусором стирались и
+    ready_key созревших наград («пора забрать») — а награда висит в ответе
+    API, пока её не заберут, и на каждом цикле уходил повторный пуш.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._order = []
+
+    def add(self, key):
+        if key in self:
+            return
+        super().add(key)
+        self._order.append(key)
+        while len(self._order) > _MAX_SEEN:
+            super().discard(self._order.pop(0))
+
+    def clear(self):
+        super().clear()
+        self._order.clear()
+
+
+_SEEN = _SeenSet()
+_SEEN_MAX = _MAX_SEEN  # совместимость со старыми тестами/скриптами
 
 # Снимок состояния для команды /api
 _STATE = {
@@ -146,14 +175,22 @@ async def _poll_fomo_native(bot=None) -> int:
             _STATE.update(last_poll=time.time(), last_status=None,
                           last_error=str(e)[:200], token_dead=True)
             if not _STATE["dead_notified"]:
-                _STATE["dead_notified"] = True
                 log.error("FOMO нативный: %s", e)
-                await notify_owner(
-                    bot,
-                    "🔑 <b>initData больше не принимается сервером игры.</b>\n"
-                    "Запустите <code>login_bot.bat</code> (одноразовый вход — дальше "
-                    "бот всё будет обновлять сам) или положите свежий "
-                    "<code>fomo.txt</code> в папку бота / <code>token_updates</code>.")
+                # Пометку «уведомлено» ставим только при ДОСТАВКЕ: раньше
+                # флаг выставлялся до отправки, и при обрыве сети алерт
+                # терялся навсегда.
+                if await notify_owner(
+                        bot,
+                        "🔑 <b>initData больше не принимается сервером игры.</b>\n"
+                        "Запустите <code>login_bot.bat</code> (одноразовый вход — дальше "
+                        "бот всё будет обновлять сам) или положите свежий "
+                        "<code>fomo.txt</code> в папку бота / <code>token_updates</code>."):
+                    _STATE["dead_notified"] = True
+            return 0
+        except fomo_client.FomoNetworkError as e:
+            # Сеть легла — это НЕ мёртвый ключ: ключ не трогаем, тихо ждём тика
+            _STATE.update(last_status=None, last_error=str(e)[:200])
+            log.warning("FOMO: %s", str(e)[:160])
             return 0
         _STATE.update(last_poll=time.time(), last_status=200, last_error="")
         if _STATE["token_dead"]:
@@ -165,6 +202,11 @@ async def _poll_fomo_native(bot=None) -> int:
         else:
             for up in found:
                 added += maybe_add(up)
+        # Сундуки аутпостов, готовые к забору (outpostClaimableCountByOutpostId):
+        # это напоминание-ДЕЙСТВИЕ («забери сейчас»), а не новый таймер из игры,
+        # поэтому ставим молча и в режиме вопросов тоже — без Да/Нет.
+        for up in claim_ready_timers(extract_claimable(data)):
+            added += maybe_add(up)
         if trace_mod.enabled():
             trace_mod.log_response("native", 200, data, found=found, added=added)
 
@@ -175,18 +217,19 @@ async def _poll_fomo_native(bot=None) -> int:
             try:
                 alld = await _FOMO.get_all(session)
                 found_all = extract_all_timers(alld)
+                all_added = 0   # счётчик именно all-находок (added — весь опрос)
                 if config.API_ASK_BEFORE_ADD:
                     await propose_new(bot, found_all)
                 else:
                     for up in found_all:
-                        added += maybe_add(up)
+                        all_added += maybe_add(up)
                 _STATE.update(last_all_status=200, last_all_error="",
-                              last_all_found=len(found_all), last_all_added=added)
+                              last_all_found=len(found_all), last_all_added=all_added)
                 log.info("FOMO /user/data/all: наград в ответе %s, из них новых: %s",
-                         len(found_all), added)
+                         len(found_all), all_added)
                 if trace_mod.enabled():
                     trace_mod.log_response("all", 200, alld,
-                                           found=found_all, added=added)
+                                           found=found_all, added=all_added)
             except fomo_client.FomoAuthError as e:
                 # ключ жив (timers только что ответил) — значит беда именно с all
                 _STATE.update(last_all_status=None, last_all_error=str(e)[:200])
@@ -358,8 +401,18 @@ def extract_all_timers(all_json, now=None):
 
     В data есть списки stClanRewards/stOutpostRewards — объекты {key,
     dateStart, dateEnd} в том же UTC-формате, что и t*-списки; калибровка
-    по serverTime. Сами списки появляются только когда награда на перезарядке
-    (собрали — через dateEnd придёт «Готово», забрали — таймер исчезнет).
+    по serverTime.
+
+    Два случая:
+    * dateEnd в будущем — награда на перезарядке: обычный таймер, пуш придёт
+      к моменту готовности;
+    * dateEnd в ПРОШЛОМ — награда УЖЕ созрела и ждёт забора (запись висит
+      в ответе, пока её не заберут). Раньше такие записи молча отбрасывались
+      фильтром «не старше 5 минут» — и «пора забрать сундук» не приходило
+      никогда (жалоба: «таймер найден, но не работает»). Теперь созревшая
+      награда даёт мгновенный таймер с пушем и стабильным dedup-ключом
+      ready_key — без повторов на каждый all-цикл.
+
     t*-списки из этого ответа НЕ разбираем — их каждый цикл отдаёт лёгкий
     /user/data/timers (дедупликация всё равно защитила бы от дублей).
     """
@@ -385,10 +438,83 @@ def extract_all_timers(all_json, now=None):
             if ts is None:
                 continue
             ends = now + (ts - base)
-            if ends < now - 300 or ends > now + 60 * 24 * 3600:
+            if ends > now + 60 * 24 * 3600:
                 continue
-            out.append({"label": tr.reward_label(list_name, it),
-                        "ends_at": ends, "bucket": list_name})
+            label = tr.reward_label(list_name, it)
+            if ends >= now - 300:
+                out.append({"label": label, "ends_at": ends, "bucket": list_name})
+            else:
+                # созревшая награда ждёт забора: мгновенный пуш + готовность
+                # к дедупликации по содержимому записи, а не по минуте now
+                out.append({"label": label, "ends_at": now, "bucket": list_name,
+                            "ready_key": ready_key(list_name, it)})
+    return out
+
+
+def ready_key(list_name, item):
+    """Стабильный ключ созревшей награды: список + ключ/id/дата записи.
+
+    dateEnd включаем обязательно: у кланового сундука key (clan_N) один и
+    тот же в каждом цикле, а вот дата созревания меняется. Ключ должен быть
+    уникален НА СОЗРЕВАНИЕ, иначе повторное «пора забрать» после сбора и
+    новой перезарядки заглушится старым ключом (до рестарта бота).
+    """
+    ident = (item.get("key") or item.get("id") or item.get("dateEnd") or "")
+    de = item.get("dateEnd") or ""
+    if de and ident != de:
+        return f"{list_name}:{ident}:{de}"
+    return f"{list_name}:{ident}"
+
+
+def extract_claimable(data):
+    """outpostClaimableCountByOutpostId из /user/data/timers -> {outpostId: count}.
+
+    Игра присылает этот словарь ВСЕГДА (в т.ч. когда таймеров нет): сколько
+    сундуков аутпостов прямо сейчас можно забрать. Поле-число, не дата, —
+    поэтому обычный парсер таймеров его никогда не видел.
+    """
+    d = data.get("data") if isinstance(data, dict) else None
+    m = d.get("outpostClaimableCountByOutpostId") if isinstance(d, dict) else None
+    if not isinstance(m, dict):
+        return {}
+    out = {}
+    for k, v in m.items():
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            out[str(k)] = n
+    return out
+
+
+_CLAIM_LAST = {}  # outpostId -> счётчик, по которому уже отчитались
+
+
+def claim_ready_timers(claim, now=None):
+    """Готовые к забору сундуки аутпостов -> таймеры с мгновенным пушем.
+
+    Пуш только на ИЗМЕНЕНИЕ счётчика (появился/вырос): 0->1, 1->2. Забрал —
+    счётчик обнулился, следующий сундук отчитается как новый. Дедуп —
+    через ready_key (claim:outpostId:count): повторы на каждый опрос не приходят.
+    """
+    now = now if now is not None else time.time()
+    out = []
+    base = tr.bucket("tOutpostClaimable")
+    for oid, n in sorted(claim.items()):
+        if _CLAIM_LAST.get(oid) == n:
+            continue
+        _CLAIM_LAST[oid] = n
+        out.append({
+            "label": base + (f" · готов к забору ×{n}" if n > 1 else " · готов к забору"),
+            "ends_at": now,
+            "bucket": "tOutpostClaimable",
+            "ready_key": f"claim:{oid}:{n}",
+        })
+    # исчезнувшие из ответа (забрал) — сброс, чтобы следующий сундук отчитался
+    for oid in list(_CLAIM_LAST):
+        if oid not in claim:
+            _CLAIM_LAST.pop(oid, None)
     return out
 
 
@@ -424,7 +550,13 @@ def extract_from_har(path, now=None):
 def maybe_add(up):
     """Поставить авто-таймер с защитой от дублей. -> 1, если добавлен."""
     label, ends_at = up["label"], float(up["ends_at"])
-    key = (label, round(ends_at / 60))  # бакет в минуту: мелкий дрейф не плодит ключи
+    rk = up.get("ready_key")
+    if rk:
+        # созревшая награда/claimable-сундук: дедуп по содержимому записи,
+        # а не по минутному бакету ends_at (он у таких всегда «сейчас»)
+        key = ("ready", rk)
+    else:
+        key = (label, round(ends_at / 60))  # бакет в минуту: мелкий дрейф не плодит ключи
     if key in _SEEN:
         return 0
     user = owner()
@@ -434,7 +566,7 @@ def maybe_add(up):
         return 0
     # Уже стоит почти такой же активный таймер (поле remaining «плывёт» на пару секунд)?
     for t in db.active(user["tg_id"]):
-        if t["label"] == label and abs(t["ends_at"] - ends_at) <= 180:
+        if t["label"] == label and (abs(t["ends_at"] - ends_at) <= 180 or rk):
             _SEEN.add(key)
             return 0
     db.add_timer(user["tg_id"], user["tg_id"], label, ends_at,
@@ -568,7 +700,10 @@ def proposal_kb(gid):
 
 
 async def propose_new(bot, found):
-    """Показать новые находки кнопками Да/Нет (режим подтверждения)."""
+    """Показать новые находки кнопками Да/Нет (режим подтверждения).
+    На паузе бот молчит: предложение будет показано после снятия паузы."""
+    if pause_state.is_paused():
+        return 0
     props = build_proposals(found)
     user = owner()
     if not props or not user or not bot:
@@ -584,16 +719,20 @@ async def propose_new(bot, found):
     return len(props)
 
 
-async def notify_owner(bot, text):
+async def notify_owner(bot, text) -> bool:
+    """Системное сообщение владельцу. -> True, если ДОСТАВЛЕНО (без бота,
+    владельца или при сетевом сбое — False: вызывающий решает, повторять ли)."""
     if not bot:
-        return
+        return False
     user = owner()
     if not user:
-        return
+        return False
     try:
         await bot.send_message(user["tg_id"], text)
+        return True
     except Exception:
         log.exception("Не удалось отправить сообщение владельцу")
+        return False
 
 
 # ---------- Опрос ----------
@@ -627,14 +766,16 @@ async def poll_once(bot=None):
 
             if status in (401, 403):
                 if not _STATE["token_dead"]:
-                    _STATE.update(token_dead=True, dead_notified=True)
+                    _STATE.update(token_dead=True)
                     log.warning("API: токен не принят (HTTP %s) — жду файл в token_updates/", status)
-                    await notify_owner(
-                        bot,
-                        "🔑 <b>Токен автотрекинга устарел</b> (HTTP %s).\n"
-                        "Положите свежий <code>fomo.txt</code> в папку бота или в "
-                        "<code>token_updates</code> — обновлю всё сам." % status,
-                    )
+                    # dead_notified — только при доставке: при упавшей сети
+                    # алерт уйдёт со следующей попытки, а не потеряется.
+                    if await notify_owner(
+                            bot,
+                            "🔑 <b>Токен автотрекинга устарел</b> (HTTP %s).\n"
+                            "Положите свежий <code>fomo.txt</code> в папку бота или в "
+                            "<code>token_updates</code> — обновлю всё сам." % status):
+                        _STATE["dead_notified"] = True
                 continue
 
             if status != 200:

@@ -52,6 +52,17 @@ class FomoAuthError(Exception):
     """initData не принята даже после auth (и юзербот не помог/не настроен)."""
 
 
+class FomoNetworkError(RuntimeError):
+    """Сетевой сбой (нет связи с api.fomofighters.xyz).
+
+    ВАЖНО отличать от FomoAuthError: раньше обрыв сети возвращал status=None,
+    и _signed_call трактовал это как «мёртвый ключ» — дёргал auth, юзербота
+    (Telethon) и слал владельцу ложное «initData больше не принимается».
+    Теперь сеть — отдельное исключение: цикл опроса просто подождёт следующего
+    тика, ключ остаётся рабочим.
+    """
+
+
 # ---------- Точный порт подписи из JS ----------
 
 def js_encode_uri_component(s: str) -> str:
@@ -226,10 +237,23 @@ class FomoClient:
 
     # -- основной ход --
 
+    @staticmethod
+    def _raise_if_net(status, data, path):
+        """status is None = сети нет (ответа сервера не было вовсе).
+
+        Раньше этот случай проваливался в цепочку «реанимации ключа» с
+        ложным FomoAuthError и пушем «ключ мёртв» при каждом обрыве сети.
+        """
+        if status is None:
+            raise FomoNetworkError(
+                "FOMO %s: сеть недоступна (%s)"
+                % (path, (data or {}).get("error", "?")))
+
     async def _signed_call(self, session, path: str, body_obj: dict) -> dict:
         """Подписанный POST с само-лечением ключа (общий ход для всех
         эндпоинтов): превентивный auth, повтор после 401, юзербот в крайнем
-        случае. Возвращает JSON или бросает FomoAuthError."""
+        случае. Возвращает JSON; сетевой сбой — FomoNetworkError,
+        мёртвый ключ — FomoAuthError."""
         async with self._lock:
             # Превентивная реанимация ключа раз в FOMO_REAUTH_INTERVAL секунд
             # (сервер может инвалидировать ключ при переподключении игры).
@@ -238,6 +262,7 @@ class FomoClient:
                 await self.auth(session)
 
             status, data = await self._post(session, path, body_obj)
+            self._raise_if_net(status, data, path)
             if status == 200 and isinstance(data, dict) and data.get("success"):
                 return data
 
@@ -246,6 +271,7 @@ class FomoClient:
                         path, status, err_code)
             if await self.auth(session):
                 status, data = await self._post(session, path, body_obj)
+                self._raise_if_net(status, data, path)
                 if status == 200 and isinstance(data, dict) and data.get("success"):
                     return data
 
@@ -256,6 +282,7 @@ class FomoClient:
                 config.set_fomo_init_data(fresh)   # сохранить в .env на будущее
                 if await self.auth(session):
                     status, data = await self._post(session, path, body_obj)
+                    self._raise_if_net(status, data, path)
                     if status == 200 and isinstance(data, dict) and data.get("success"):
                         return data
             raise FomoAuthError(

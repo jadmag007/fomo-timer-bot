@@ -12,7 +12,10 @@ _ENV_PATH = str(Path(__file__).resolve().parent / ".env")
 load_dotenv(_ENV_PATH)
 
 # --- Версия. ПРАВИЛО: бампается при КАЖДОМ изменении кода/документации ---
-APP_VERSION = "0.0.6-alpha"
+# 0.1.0.1 — промежуточный релиз: github_push.bat сам распаковывает zip перед
+# пушем; по код-ревью: сетевой сбой больше не считается «мёртвым ключом»,
+# блокировка SQLite на потоки, атомарные записи, чистки БД и token_updates.
+APP_VERSION = "0.1.0.1"
 
 # --- Основное ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -100,14 +103,16 @@ QUICK_PRESETS = [300, 900, 1800, 2700, 3600, 7200, 14400, 28800, 43200, 86400]
 
 # ---------- Работа с .env ----------
 
-def env_get(key, default="", env_path=".env") -> str:
+def env_get(key, default="", env_path=None) -> str:
     """Прочитать значение ключа прямо из файла .env, минуя память процесса.
 
     Нужен, когда .env обновляется извне (login_userbot.py сохранил личные
     api-ключи), а работающий процесс ещё не перечитывал конфиг.
+    Путь по умолчанию — .env РЯДОМ С config.py (не зависит от CWD: раньше
+    запуск не из папки проекта молча читал чужой/несуществующий файл).
     """
     try:
-        p = Path(env_path)
+        p = Path(env_path) if env_path else Path(_ENV_PATH)
         if not p.exists():
             return default
         for line in p.read_text(encoding="utf-8").splitlines():

@@ -11,11 +11,13 @@
   tdeny:{gid}     — «Нет»: не добавлять (и больше не предлагать эти)
   ask             — переключить режим подтверждения (кнопка в /апи)
   trace           — переключить трассировку (кнопка в /апи)
+  pause           — пауза/продолжить: остановить и вернуть пуши
   help            — справка
 
 Команды:
   /т 22:24 лесопилка   — таймер в формате игры (мм:сс / чч:мм:сс)
   /т 45м  /т 1ч 30м    — таймер с суффиксами
+  /пауза               — то же, что кнопка: вкл/выкл пуши
   /таймеры /пояс /апи /вопросы /трассировка /трейслог /help
 """
 import html
@@ -23,6 +25,7 @@ import logging
 import time
 
 from aiogram import F, Router
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
@@ -38,6 +41,7 @@ import api_poller
 import config
 import db
 import apitrace as trace_mod
+import pause_state
 import tunnel
 import webapp_server
 from util import fmt_clock, fmt_delta, local_str, parse_duration, safe_tz
@@ -48,6 +52,16 @@ log = logging.getLogger("handlers")
 # «Ждём ввод своего времени / пояса» (in-memory; после рестарта просто вводим ещё раз)
 _PENDING_CUSTOM = set()   # tg_id
 _PENDING_TZ = set()       # tg_id
+
+
+@router.message(lambda m: bool(m.text) and m.text.startswith("/"))
+async def _command_while_pending(message: Message):
+    """Команда во время режима «введите время» — снять ожидание и выполнить
+    команду. Раньше флаг ожидания оставался, и следующее случайное сообщение
+    (не команда) молча ставило таймер."""
+    if message.from_user is not None:
+        _PENDING_CUSTOM.discard(message.from_user.id)
+    raise SkipHandler  # команда продолжит обычную обработку дальше по роутеру
 
 TZ_LIST = [
     "Europe/Moscow", "Europe/Kyiv", "Europe/Minsk", "Europe/Berlin",
@@ -63,6 +77,52 @@ MENU_TEXT = (
     "🎯 Все таймеры на одном экране: кнопка меню ☰ или <code>/app</code>.\n\n"
     f"🧪 <i>Fomo Timer Bot v{config.APP_VERSION}</i>"
 )
+
+
+def menu_text():
+    """Меню с баннером паузы (если бот сейчас на паузе)."""
+    if pause_state.is_paused():
+        mins = _paused_mins()
+        return (
+            f"⏸ <b>БОТ НА ПАУЗЕ</b> — пуши не отправляются ({mins}).\n"
+            "Таймеры продолжают ставиться; всё завершённое придёт одной "
+            "сводкой после «Продолжить».\n\n" + MENU_TEXT
+        )
+    return MENU_TEXT
+
+
+def _paused_mins():
+    at = pause_state.paused_at()
+    if not at:
+        return "меньше минуты"
+    return fmt_delta(max(60, int(time.time() - at) // 60 * 60))
+
+
+def resume_summary_text(missed, paused_at):
+    """Одна сводка вместо кучи «догоняющих» пушей после снятия паузы."""
+    tz = safe_tz(config.DEFAULT_TZ)
+    mins = ""
+    if paused_at:
+        secs = max(60, int(time.time() - paused_at) // 60 * 60)
+        mins = f" (пауза длилась {fmt_delta(secs)})"
+    head = (f"▶️ <b>Пауза снята</b> — пуши снова работают{mins}.\n"
+            f"Пока вас не было, завершилось: {len(missed)}\n")
+    show = missed[:12]
+    # метки в БД хранятся УЖЕ экранированными (create_timer_reply) —
+    # второй html.escape давал на экране «&amp;» вместо символа
+    lines = [f"  ✅ {m['label']} — {local_str(m['ends_at'], tz)}"
+             for m in show]
+    extra = len(missed) - len(show)
+    if extra > 0:
+        lines.append(f"  …и ещё {extra}")
+    return head + "\n".join(lines)
+
+
+def pause_btn():
+    """Кнопка паузы для главного меню: ⏸ Пауза ↔ ▶️ Продолжить."""
+    if pause_state.is_paused():
+        return InlineKeyboardButton(text="▶️ Продолжить", callback_data="pause")
+    return InlineKeyboardButton(text="⏸ Пауза", callback_data="pause")
 
 
 # ---------- Помощники ----------
@@ -91,8 +151,11 @@ async def edit(cb: CallbackQuery, text, kb=None):
         else:
             await cb.bot.send_message(cb.from_user.id, text, reply_markup=kb)
         return
-    except TelegramBadRequest:
-        pass
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            return  # перерисовали то же самое — не надо дублировать сообщение
+    except Exception as e:
+        log.warning("edit failed: %s", e)
     try:
         if m is not None:
             await m.answer(text, reply_markup=kb)
@@ -137,6 +200,7 @@ def kb_main(tg_id):
                              callback_data="tz"),
         InlineKeyboardButton(text="❓ Справка", callback_data="help"),
     ])
+    rows.append([pause_btn()])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -252,6 +316,7 @@ def help_text():
         "<code>/т 22:24 лесопилка</code> — таймер (подпись необязательна)\n"
         "<code>/таймеры</code> — список активных · <code>/пояс</code> — часовой пояс\n"
         "<code>/апи</code> — автотрекинг · <code>/вопросы</code> — Да/Нет вкл/выкл\n"
+        "<code>/пауза</code> — остановить/вернуть пуши (уходя от компа)\n"
         "<code>/трассировка</code> — лог сырых ответов API вкл/выкл\n"
         "<code>/трейслог</code> — прислать файл trace.log · "
         "<code>/help</code> — справка\n\n"
@@ -268,6 +333,17 @@ def help_text():
 
 def api_status_text():
     st = api_poller.status()
+    body = _api_status_body(st)
+    if pause_state.is_paused():
+        return (
+            "⏸ <b>БОТ НА ПАУЗЕ</b> — пуши не отправляются ({}).\n"
+            "Трекинг работает, таймеры ставятся; завершённое придёт одной "
+            "сводкой после «Продолжить» (кнопка в меню или /пауза).\n\n"
+        ).format(_paused_mins()) + body
+    return body
+
+
+def _api_status_body(st):
     if not st["enabled"] or not st["configured"]:
         return (
             "🤖 <b>Автотрекинг</b>\n"
@@ -374,7 +450,7 @@ async def cmd_start(message: Message):
     db.upsert_user(message.from_user.id, config.DEFAULT_TZ)
     _PENDING_CUSTOM.discard(message.from_user.id)
     _PENDING_TZ.discard(message.from_user.id)
-    await message.answer(MENU_TEXT, reply_markup=kb_main(message.from_user.id))
+    await message.answer(menu_text(), reply_markup=kb_main(message.from_user.id))
 
 
 @router.message(Command("help"))
@@ -411,7 +487,7 @@ async def cmd_tz(message: Message):
 @router.message(Command("menu"))
 async def cmd_menu(message: Message):
     db.upsert_user(message.from_user.id, config.DEFAULT_TZ)
-    await message.answer(MENU_TEXT, reply_markup=kb_main(message.from_user.id))
+    await message.answer(menu_text(), reply_markup=kb_main(message.from_user.id))
 
 
 @router.message(Command("app"))
@@ -573,7 +649,7 @@ async def cb_menu(cb: CallbackQuery):
     db.upsert_user(cb.from_user.id, config.DEFAULT_TZ)
     _PENDING_CUSTOM.discard(cb.from_user.id)
     _PENDING_TZ.discard(cb.from_user.id)
-    await edit(cb, MENU_TEXT, kb_main(cb.from_user.id))
+    await edit(cb, menu_text(), kb_main(cb.from_user.id))
     await cb.answer()
 
 
@@ -637,7 +713,7 @@ async def cb_tz_set(cb: CallbackQuery):
         await cb.answer()
         return
     db.set_tz(cb.from_user.id, name)
-    await edit(cb, MENU_TEXT, kb_main(cb.from_user.id))
+    await edit(cb, menu_text(), kb_main(cb.from_user.id))
     await cb.answer("Сохранено")
 
 
@@ -698,6 +774,52 @@ async def cb_trace_toggle(cb: CallbackQuery):
 async def cb_help(cb: CallbackQuery):
     await edit(cb, help_text(), kb_back_menu())
     await cb.answer()
+
+
+# ---------- Пауза (кнопка в меню и /пауза) ----------
+
+@router.callback_query(F.data == "pause")
+async def cb_pause(cb: CallbackQuery):
+    db.upsert_user(cb.from_user.id, config.DEFAULT_TZ)
+    was = pause_state.is_paused()
+    snap = pause_state.set_paused(not was)
+    log.info("Пауза %s (владелец)", "снята" if was else "включена")
+    await edit(cb, menu_text(), kb_main(cb.from_user.id))
+    if was:
+        await cb.answer("▶️ Пуши снова работают")
+        missed = pause_state.take_missed()
+        if missed and cb.message is not None:
+            try:
+                await cb.message.answer(
+                    resume_summary_text(missed, snap.get("paused_at")))
+            except Exception:
+                log.exception("Не удалось отправить сводку после паузы")
+    else:
+        await cb.answer("⏸ Пуши остановлены — пока не нажмёте «Продолжить»")
+
+
+@router.message(Command("pause", "пауза"))
+async def cmd_pause(message: Message):
+    """Пауза/продолжить: то же, что кнопка в меню."""
+    db.upsert_user(message.from_user.id, config.DEFAULT_TZ)
+    was = pause_state.is_paused()
+    snap = pause_state.set_paused(not was)
+    log.info("Пауза %s (команда)", "снята" if was else "включена")
+    if not was:
+        await message.answer(
+            "⏸ <b>Бот поставлен на паузу.</b>\n\n"
+            "Пуши («Готово ✅», предупреждения, предложения Да/Нет) больше "
+            "не приходят, пока не нажмёте ▶️ <b>Продолжить</b> в меню или "
+            "не пришлёте <code>/пауза</code> ещё раз.\n\n"
+            "Таймеры продолжают ставиться, автотрекинг работает, всё "
+            "завершённое придёт одной сводкой после возобновления.",
+            reply_markup=kb_main(message.from_user.id),
+        )
+        return
+    await message.answer(menu_text(), reply_markup=kb_main(message.from_user.id))
+    missed = pause_state.take_missed()
+    if missed:
+        await message.answer(resume_summary_text(missed, snap.get("paused_at")))
 
 
 # ---------- Ввод текстом (должны быть ПОСЛЕДними — ловят любой текст) ----------

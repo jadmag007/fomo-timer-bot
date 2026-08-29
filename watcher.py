@@ -18,6 +18,7 @@
   6. Файл переезжает в token_updates/done/ (там ваш игровой токен — не публиковать).
 """
 import asyncio
+import html
 import json
 import logging
 import shutil
@@ -27,6 +28,7 @@ from pathlib import Path
 import api_poller
 import config
 import db
+import pause_state
 import userbot
 from tools import har_apply
 
@@ -155,6 +157,21 @@ def _unique_dst(dst: Path) -> Path:
     return dst.with_name(f"{dst.stem}_{int(time.time())}{dst.suffix}")
 
 
+def cleanup_done(keep=20):
+    """token_updates/done/ не должен расти вечно: каждый файл — живой игровой
+    токен. Храним последние keep обработанных, старше — удаляем."""
+    try:
+        files = sorted(DONE.glob("*"), key=lambda p: p.stat().st_mtime,
+                       reverse=True)
+    except OSError:
+        return
+    for p in files[keep:]:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
 async def loop(bot):
     """Фоновая задача бота: раз в SCAN_INTERVAL секунд обходим папку и корень."""
     WATCH.mkdir(exist_ok=True)
@@ -163,6 +180,7 @@ async def loop(bot):
     while True:
         try:
             take_root_file()
+            cleanup_done()
             for f in sorted(WATCH.iterdir()):
                 if not f.is_file() or f.suffix.lower() not in SUPPORTED:
                     continue
@@ -184,19 +202,30 @@ async def loop(bot):
                     tail = ("\n\nФайл переехал в <code>token_updates/done/</code>. "
                             "Внутри ваш игровой токен — наружу не выкладывайте.")
                     try:
-                        await bot.send_message(chat, f"{head}\n<pre>{report}</pre>{tail}")
+                        # report — сырой текст ответа API/ошибок: экранируем,
+                        # иначе случайный '<' роняет отправку и отчёт теряется
+                        await bot.send_message(
+                            chat, f"{head}\n<pre>{html.escape(report)}</pre>{tail}")
                     except Exception:
                         log.exception("Не удалось отправить отчёт в Telegram")
                     if entries and config.API_ASK_BEFORE_ADD:
-                        gid = api_poller.register_pending(chat, entries)
-                        try:
-                            await bot.send_message(
-                                chat,
-                                api_poller.proposal_text(entries),
-                                reply_markup=api_poller.proposal_kb(gid),
-                            )
-                        except Exception:
-                            log.exception("Не удалось отправить предложение таймеров")
+                        # Гейт паузы (как у propose_new в api_poller): на паузе
+                        # предложение не уходит — таймеры предложатся после
+                        # снятия следующим опросом, ничего не теряется.
+                        if pause_state.is_paused():
+                            log.info("Watcher: бот на паузе — предложение «Да/Нет» "
+                                     "не отправляю (%s шт.), спросит после снятия",
+                                     len(entries))
+                        else:
+                            gid = api_poller.register_pending(chat, entries)
+                            try:
+                                await bot.send_message(
+                                    chat,
+                                    api_poller.proposal_text(entries),
+                                    reply_markup=api_poller.proposal_kb(gid),
+                                )
+                            except Exception:
+                                log.exception("Не удалось отправить предложение таймеров")
         except Exception:
             log.exception("Ошибка в цикле watcher")
         await asyncio.sleep(SCAN_INTERVAL)

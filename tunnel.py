@@ -180,16 +180,22 @@ def cloudflared_path():
 
 
 def download_cloudflared(dest=None, timeout=180) -> Path:
-    """Скачать cloudflared с официального релиза. -> путь или исключение."""
+    """Скачать cloudflared с официального релиза. -> путь или исключение.
+
+    Качаем в .part и переименовываем атомарно: обрыв сети раньше оставлял
+    битый бинарник под финальным именем, ensure_binary его «находил» —
+    и туннель вечно не поднимался.
+    """
     sysname = "win32" if sys.platform.startswith("win") else (
         "darwin" if sys.platform == "darwin" else "linux")
     fname = {"win32": "cloudflared.exe", "darwin": "cloudflared",
              "linux": "cloudflared"}[sysname]
     url = DOWNLOADS[(sysname, fname)]
     dest = Path(dest) if dest else ROOT / fname
+    tmp = dest.with_name(dest.name + ".part")
     log.info("Мини-апп: скачиваю cloudflared (~20 МБ, один раз)…")
     req = urllib.request.Request(url, headers={"User-Agent": "fomo-timer-bot"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp, open(dest, "wb") as f:
+    with urllib.request.urlopen(req, timeout=timeout) as resp, open(tmp, "wb") as f:
         while True:
             chunk = resp.read(1 << 16)
             if not chunk:
@@ -197,9 +203,10 @@ def download_cloudflared(dest=None, timeout=180) -> Path:
             f.write(chunk)
     if sysname != "win32":
         try:
-            dest.chmod(dest.stat().st_mode | 0o111)
+            tmp.chmod(tmp.stat().st_mode | 0o111)
         except OSError:
             pass
+    os.replace(tmp, dest)
     log.info("Мини-апп: cloudflared готов: %s (%s КБ)",
              dest.name, dest.stat().st_size // 1024)
     return dest
@@ -272,6 +279,18 @@ def _kill(proc):
             pass
 
 
+# Живой процесс cloudflared — для уборки при выходе из бота (иначе на Windows
+# после каждого рестарта start.bat копятся осиротевшие cloudflared.exe)
+_CURRENT = {"proc": None}
+
+
+def _kill_current():
+    p = _CURRENT.get("proc")
+    if p is not None:
+        _kill(p)
+        _CURRENT["proc"] = None
+
+
 def _finish_down():
     _STATUS["running"] = False
     _STATUS["down_at"] = time.time()
@@ -299,6 +318,7 @@ def _run_once(binary, port, protocol, on_url, on_down):
     except Exception as e:
         log.warning("Мини-апп: cloudflared не запустился: %s", e)
         return "no_url"
+    _CURRENT["proc"] = proc
     _STATUS["running"] = True
     _STATUS["verified"] = False
     _STATUS["protocol"] = protocol
@@ -371,22 +391,30 @@ def start(port=None, on_url=lambda u: None, on_down=lambda: None,
     проверенный туннель умер; on_blocked — один раз на серию неудач, когда
     адрес не подтверждается ни одним протоколом (сеть режет 7844).
 
-    Возвращает threading.Thread (daemon) или None, если cloudflared
-    недоступен (тогда мини-апп останется только локальным, а /app честно
-    об этом скажет).
+    Скачивание cloudflared (~20 МБ) происходит ВНУТРИ потока-надзирателя:
+    раньше ensure_binary() выполнялся прямо в event-loop и на первом запуске
+    подвешивал весь бот до трёх минут.
+
+    Возвращает threading.Thread (daemon).
     """
+    import atexit
+    atexit.register(_kill_current)   # выход из бота — cloudflared не осиротеет
     port = int(port if port is not None else config.WEBAPP_PORT)
-    binary = ensure_binary(auto_download=auto_download)
-    if binary is None:
-        log.warning("Мини-апп: cloudflared недоступен — публичного адреса не "
-                    "будет (свой адрес можно вписать в WEBAPP_PUBLIC_URL)")
-        return None
     protocols = protocol_list()
 
     def watcher():
+        binary = None
         i = 0
         blocked_sent = False
         while True:
+            if binary is None:
+                binary = ensure_binary(auto_download=auto_download)
+                if binary is None:
+                    log.warning("Мини-апп: cloudflared недоступен — публичного "
+                                "адреса не будет (свой адрес можно вписать в "
+                                "WEBAPP_PUBLIC_URL). Попробую снова через 30 с")
+                    time.sleep(30)
+                    continue
             proto = protocols[i % len(protocols)]
             outcome = _run_once(binary, port, proto, on_url, on_down)
             if outcome == "ok":

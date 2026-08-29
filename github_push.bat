@@ -1,14 +1,37 @@
 @echo off
 setlocal EnableExtensions
 cd /d "%~dp0"
-title Fomo Timer Bot - publish to GitHub
+title Fomo Timer Bot - update from zip + publish to GitHub
 
 echo ============================================
-echo   Fomo Timer Bot - publish to GitHub
+echo   Fomo Timer Bot - update zip + GitHub push
 echo ============================================
 echo.
 
-rem ---------- 1. git installed? ----------
+rem ---------- 0. self-update: the zip may bring a newer copy of this file ----------
+if not exist "github_push.bat.new" goto :no_selfupdate
+copy /y "github_push.bat.new" "github_push.bat" >nul
+del "github_push.bat.new" >nul 2>nul
+echo github_push.bat was updated by the zip. Please run it once more.
+pause
+(goto) 2>nul & exit /b 0
+:no_selfupdate
+
+rem ---------- 1. unpack fomo-timer-bot.zip over this folder (if present) ----------
+if not exist "fomo-timer-bot.zip" goto :nozip
+echo Found fomo-timer-bot.zip - unpacking over this folder...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $tmp=Join-Path $env:TEMP ('fomo_unzip_'+[guid]::NewGuid().ToString('N')); Expand-Archive -LiteralPath (Join-Path (Get-Location) 'fomo-timer-bot.zip') -DestinationPath $tmp -Force; $src=Join-Path $tmp 'fomo-timer-bot'; if (-not (Test-Path $src)) { $src=$tmp }; robocopy $src (Get-Location).Path /E /NFL /NDL /NJH /NJS /NP /XF .env github_repo.txt github_push.bat fomo.txt userbot.session cloudflared.exe /XD .git .venv venv data token_updates __pycache__ | Out-Null; $rc=$LASTEXITCODE; try { Remove-Item -Recurse -Force $tmp } catch {}; if ($rc -ge 8) { exit $rc } else { exit 0 }"
+if errorlevel 1 (
+    echo [!] Unpack failed - the zip may be broken or files are locked.
+    echo     Close the bot window ^(start.bat^) and run this file again.
+    pause
+    exit /b 1
+)
+echo Unpacked. Kept untouched: .env, data/, sessions, this .bat file.
+echo.
+:nozip
+
+rem ---------- 2. git installed? ----------
 where git >nul 2>nul
 if errorlevel 1 (
     echo [!] Git is not installed.
@@ -24,7 +47,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-rem ---------- 2. local repository exists? ----------
+rem ---------- 3. local repository exists? ----------
 if not exist ".git" (
     echo First publish: creating the local repository...
     git init -b main >nul 2>&1
@@ -35,7 +58,7 @@ if not exist ".git" (
 )
 echo.
 
-rem ---------- 3. where to push (remote) ----------
+rem ---------- 4. where to push (remote) ----------
 set "URL="
 if exist "github_repo.txt" set /p "URL=" < "github_repo.txt"
 if defined URL set "URL=%URL:"=%"
@@ -74,7 +97,7 @@ goto :remote_done
 :remote_done
 echo.
 
-rem ---------- 4. who commits (one time, just your GitHub nick) ----------
+rem ---------- 5. who commits (one time, just your GitHub nick) ----------
 git config user.name >nul 2>&1
 if not errorlevel 1 goto :identity_ok
 echo Git needs a name for commits. Enter your GitHub nickname
@@ -92,18 +115,28 @@ echo Saved: %GHU% ^<%GHU%@users.noreply.github.com^>
 :identity_ok
 echo.
 
-rem ---------- 5. stage and commit ----------
+rem ---------- 6. bot version for the commit message ----------
+set "VER="
+if exist "config.py" for /f "tokens=2 delims== " %%v in ('findstr /b /c:"APP_VERSION" config.py') do set "VER=%%v"
+if defined VER set "VER=%VER:"=%"
+
+rem ---------- 7. stage and commit ----------
 git add -A
 git diff --cached --quiet
-if errorlevel 1 (
-    git commit -m "Update %date% %time%" >nul
-    if errorlevel 1 goto :fail
-) else (
+if not errorlevel 1 (
     echo No new changes to commit. Checking GitHub anyway...
+    goto :push
 )
+if defined VER (
+    git commit -m "Update to %VER% (%date% %time%)" >nul
+) else (
+    git commit -m "Update %date% %time%" >nul
+)
+if errorlevel 1 goto :fail
+:push
 echo.
 
-rem ---------- 6. push ----------
+rem ---------- 8. push ----------
 echo Publishing to GitHub...
 git push -u origin main
 if not errorlevel 1 goto :done
@@ -129,7 +162,8 @@ echo ============================================
 echo   Published! Check it at github.com
 echo ============================================
 echo Personal files are NOT published ^(protected by .gitignore^):
-echo .env, userbot.session, fomo.txt, token_updates/, data/ and logs.
+echo .env, userbot.session, fomo.txt, token_updates/, data/, logs,
+echo fomo-timer-bot.zip and github_push.bat itself.
 echo.
 echo Tip: start.bat now checks GitHub on every launch and installs
 echo updates automatically on any PC with this repository.

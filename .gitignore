@@ -42,3 +42,10 @@ python-installer.exe
 # --- Туннель cloudflared для мини-аппа (~20 МБ, качается сам) ---
 cloudflared.exe
 cloudflared
+
+# --- Служебное (только локально): архив обновлений и батник публикации ---
+# Архив качается из чата с ботом-разработчиком в папку проекта,
+# github_push.bat сам его распакует и запушит — в git они не нужны.
+fomo-timer-bot.zip
+github_push.bat
+github_push.bat.new

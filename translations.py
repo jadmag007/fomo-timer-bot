@@ -43,6 +43,10 @@ BUCKETS = {
     # FOMO_ALL_INTERVAL секунд и ставит таймеры по dateEnd.
     "stClanRewards": "🎁 Клановый сундук",
     "stOutpostRewards": "📦 Награда аванпоста",
+    # Сундуки аутпостов, готовые к забору прямо сейчас
+    # (outpostClaimableCountByOutpostId в /user/data/timers) — мгновенное
+    # напоминание, появляется в списке только до момента забора.
+    "tOutpostClaimable": "🏰 Сундук аутпоста",
 }
 
 # ---------- Здания (buildingKey) ----------

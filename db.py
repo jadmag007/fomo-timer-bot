@@ -1,11 +1,19 @@
-"""SQLite-хранилище пользователей и таймеров (stdlib sqlite3, без внешних зависимостей)."""
+"""SQLite-хранилище пользователей и таймеров (stdlib sqlite3, без внешних зависимостей).
+
+Одно соединение используется из НЕСКОЛЬКИХ потоков (event-loop бота, потоки
+веб-сервера мини-аппа, worker watcher'а) — поэтому каждый публичный вызов
+ берётся реентерабельным локом _LOCK: без него возможны «Recursive use of
+cursors» и перемешанные коммиты при совпадении тиков.
+"""
 import os
 import sqlite3
+import threading
 import time
 
 import config
 
 _conn = None
+_LOCK = threading.RLock()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(
@@ -49,17 +57,18 @@ def init(path=None):
     и только затем backfill bucket по меткам.
     """
     global _conn
-    path = path or config.DB_PATH
-    d = os.path.dirname(path)
-    if d:
-        os.makedirs(d, exist_ok=True)
-    _conn = sqlite3.connect(path, check_same_thread=False)
-    _conn.row_factory = sqlite3.Row
-    _migrate_columns()
-    _conn.executescript(SCHEMA)
-    _migrate_backfill()
-    _conn.commit()
-    return _conn
+    with _LOCK:
+        path = path or config.DB_PATH
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        _conn = sqlite3.connect(path, check_same_thread=False)
+        _conn.row_factory = sqlite3.Row
+        _migrate_columns()
+        _conn.executescript(SCHEMA)
+        _migrate_backfill()
+        _conn.commit()
+        return _conn
 
 
 def _migrate_columns():
@@ -88,71 +97,82 @@ def _db():
 # ---------- Пользователи ----------
 
 def get_user(tg_id):
-    return _db().execute("SELECT * FROM users WHERE tg_id=?", (tg_id,)).fetchone()
+    with _LOCK:
+        return _db().execute("SELECT * FROM users WHERE tg_id=?", (tg_id,)).fetchone()
 
 
 def first_user():
     """Первый зарегистрировавшийся пользователь (владелец по умолчанию)."""
-    return _db().execute("SELECT * FROM users ORDER BY created_at LIMIT 1").fetchone()
+    with _LOCK:
+        return _db().execute(
+            "SELECT * FROM users ORDER BY created_at LIMIT 1").fetchone()
 
 
 def upsert_user(tg_id, tz=None):
-    _db().execute(
-        "INSERT INTO users(tg_id, tz) VALUES(?, ?) "
-        "ON CONFLICT(tg_id) DO NOTHING",
-        (tg_id, tz or config.DEFAULT_TZ),
-    )
-    _db().commit()
+    with _LOCK:
+        _db().execute(
+            "INSERT INTO users(tg_id, tz) VALUES(?, ?) "
+            "ON CONFLICT(tg_id) DO NOTHING",
+            (tg_id, tz or config.DEFAULT_TZ),
+        )
+        _db().commit()
 
 
 def set_tz(tg_id, tz):
-    upsert_user(tg_id)
-    _db().execute("UPDATE users SET tz=? WHERE tg_id=?", (tz, tg_id))
-    _db().commit()
+    with _LOCK:
+        upsert_user(tg_id)
+        _db().execute("UPDATE users SET tz=? WHERE tg_id=?", (tz, tg_id))
+        _db().commit()
 
 
 # ---------- Таймеры ----------
 
 def add_timer(tg_id, chat_id, label, ends_at, created_at=None, bucket=""):
-    cur = _db().execute(
-        "INSERT INTO timers(tg_id, chat_id, label, ends_at, created_at, bucket) "
-        "VALUES(?, ?, ?, ?, ?, ?)",
-        (tg_id, chat_id, label, ends_at,
-         created_at if created_at is not None else time.time(),
-         bucket or ""),
-    )
-    _db().commit()
-    return cur.lastrowid
+    with _LOCK:
+        cur = _db().execute(
+            "INSERT INTO timers(tg_id, chat_id, label, ends_at, created_at, bucket) "
+            "VALUES(?, ?, ?, ?, ?, ?)",
+            (tg_id, chat_id, label, ends_at,
+             created_at if created_at is not None else time.time(),
+             bucket or ""),
+        )
+        _db().commit()
+        return cur.lastrowid
 
 
 def active(tg_id):
-    return _db().execute(
-        "SELECT * FROM timers WHERE tg_id=? AND done_sent=0 ORDER BY ends_at",
-        (tg_id,),
-    ).fetchall()
+    with _LOCK:
+        return _db().execute(
+            "SELECT * FROM timers WHERE tg_id=? AND done_sent=0 ORDER BY ends_at",
+            (tg_id,),
+        ).fetchall()
 
 
 def get_timer(timer_id):
-    return _db().execute("SELECT * FROM timers WHERE id=?", (timer_id,)).fetchone()
+    with _LOCK:
+        return _db().execute(
+            "SELECT * FROM timers WHERE id=?", (timer_id,)).fetchone()
 
 
 def cancel(tg_id, timer_id):
-    cur = _db().execute(
-        "DELETE FROM timers WHERE id=? AND tg_id=?", (timer_id, tg_id)
-    )
-    _db().commit()
-    return cur.rowcount > 0
+    with _LOCK:
+        cur = _db().execute(
+            "DELETE FROM timers WHERE id=? AND tg_id=?", (timer_id, tg_id)
+        )
+        _db().commit()
+        return cur.rowcount > 0
 
 
 def due_warn(now):
     """Таймеры, по которым пора слать предупреждение T-1мин."""
-    return _db().execute(
-        "SELECT * FROM timers "
-        "WHERE done_sent=0 AND warn_sent=0 "
-        "AND ends_at > ? AND ends_at - ? <= ? "
-        "AND ends_at - created_at >= ?",
-        (now, now, config.WARN_BEFORE_SEC + 1, config.WARN_MIN_DURATION),
-    ).fetchall()
+    with _LOCK:
+        return _db().execute(
+            "SELECT * FROM timers "
+            "WHERE done_sent=0 AND warn_sent=0 "
+            "AND ends_at > ? AND ends_at - ? <= ? "
+            "AND ends_at - created_at >= ?",
+            (now, now, config.WARN_BEFORE_SEC + 1, config.WARN_MIN_DURATION),
+        ).fetchall()
 
 
 def due_prewarn(now):
@@ -166,33 +186,53 @@ def due_prewarn(now):
     if config.SIEGE_PREWARN_SEC <= 0:
         return []
     floor = min(120, config.SIEGE_PREWARN_SEC)
-    return _db().execute(
-        "SELECT * FROM timers "
-        "WHERE done_sent=0 AND prenote_sent=0 AND bucket='tOutpostSiegesMine' "
-        "AND ends_at > ? AND ends_at - ? <= ? AND ends_at - ? > ?",
-        (now, now, config.SIEGE_PREWARN_SEC + 5, now, floor),
-    ).fetchall()
+    with _LOCK:
+        return _db().execute(
+            "SELECT * FROM timers "
+            "WHERE done_sent=0 AND prenote_sent=0 AND bucket='tOutpostSiegesMine' "
+            "AND ends_at > ? AND ends_at - ? <= ? AND ends_at - ? > ?",
+            (now, now, config.SIEGE_PREWARN_SEC + 5, now, floor),
+        ).fetchall()
 
 
 def due_done(now):
     """Таймеры, время которых вышло (в т.ч. просроченные после офлайна бота)."""
-    return _db().execute(
-        "SELECT * FROM timers WHERE done_sent=0 AND ends_at <= ?", (now,)
-    ).fetchall()
+    with _LOCK:
+        return _db().execute(
+            "SELECT * FROM timers WHERE done_sent=0 AND ends_at <= ?", (now,)
+        ).fetchall()
 
 
 def mark_warn(timer_id):
-    _db().execute("UPDATE timers SET warn_sent=1 WHERE id=?", (timer_id,))
-    _db().commit()
+    with _LOCK:
+        _db().execute("UPDATE timers SET warn_sent=1 WHERE id=?", (timer_id,))
+        _db().commit()
 
 
 def mark_prewarn(timer_id):
-    _db().execute("UPDATE timers SET prenote_sent=1 WHERE id=?", (timer_id,))
-    _db().commit()
+    with _LOCK:
+        _db().execute("UPDATE timers SET prenote_sent=1 WHERE id=?", (timer_id,))
+        _db().commit()
 
 
 def mark_done(timer_id):
-    _db().execute(
-        "UPDATE timers SET done_sent=1, warn_sent=1 WHERE id=?", (timer_id,)
-    )
-    _db().commit()
+    with _LOCK:
+        _db().execute(
+            "UPDATE timers SET done_sent=1, warn_sent=1 WHERE id=?", (timer_id,)
+        )
+        _db().commit()
+
+
+def cleanup_old(days=30):
+    """Удалить закрытые (done_sent=1) таймеры старше N суток.
+
+    Автотрекинг кладёт по таймеру на каждый кулдаун сундуков/аванпостов —
+    без чистки БД растёт бесконечно. -> сколько строк удалено.
+    """
+    with _LOCK:
+        cur = _db().execute(
+            "DELETE FROM timers WHERE done_sent=1 AND ends_at < ?",
+            (time.time() - days * 86400,),
+        )
+        _db().commit()
+        return cur.rowcount

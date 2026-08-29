@@ -253,10 +253,11 @@
       if (code === 0) {
         setOnline("err", "нет связи с ботом");
         $("offline").style.display = "block";
+        schedulePoll(); // сеть упала — не даём цепочке автоопроса умереть
         return; // данные остаются на экране
       }
       $("offline").style.display = "none";
-      if (!j.ok) { setOnline("err", j.error || "ошибка"); return; }
+      if (!j.ok) { setOnline("err", j.error || "ошибка"); schedulePoll(); return; }
       STATE = j;
       render();
       schedulePoll();
@@ -287,7 +288,8 @@
     $("ver").textContent = "v" + STATE.version;
     var st = STATE.api || {};
     var stTxt, stKind = "ok";
-    if (!STATE.app || !STATE.app.url) { stTxt = "мини-апп ещё поднимается…"; stKind = "warn"; }
+    if (STATE.paused) { stTxt = "⏸ бот на паузе — пуши не приходят"; stKind = "warn"; }
+    else if (!STATE.app || !STATE.app.url) { stTxt = "мини-апп ещё поднимается…"; stKind = "warn"; }
     else if (st.token_dead) { stTxt = "ключ игры устарел — автотрекинг стоит"; stKind = "err"; }
     else if (st.last_poll) {
       stTxt = "игра: опрос " + agoStr(st.last_poll) + (st.last_status ? " · HTTP " + st.last_status : "");

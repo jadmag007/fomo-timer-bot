@@ -37,6 +37,13 @@ echo.
 
 :loop
 ".venv\Scripts\python.exe" bot.py
+if errorlevel 2 (
+    echo.
+    echo Configuration problem ^(exit code 2, e.g. no token in .env^).
+    echo NOT restarting - fix the problem shown above and run start.bat again.
+    pause
+    exit /b 2
+)
 if errorlevel 1 (
     echo.
     echo Bot crashed. Restarting in 5 seconds...

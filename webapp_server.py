@@ -34,6 +34,7 @@ from urllib.parse import parse_qsl
 
 import config
 import db
+import pause_state
 import webapp_prefs
 import translations as tr
 
@@ -196,6 +197,7 @@ def build_state(now=None):
         "ok": True,
         "version": config.APP_VERSION,
         "now": now,
+        "paused": pause_state.is_paused(),
         "user": owner["tg_id"] if owner else None,
         "timers": timers,
         "groups": group_list,

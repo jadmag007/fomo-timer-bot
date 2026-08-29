@@ -18,6 +18,7 @@
 лишнего.
 """
 import json
+import os
 import threading
 from pathlib import Path
 
@@ -63,7 +64,9 @@ def _save(data):
     global _CACHE, _CACHE_MTIME
     try:
         _PATH.parent.mkdir(parents=True, exist_ok=True)
-        _PATH.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        tmp = _PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, _PATH)  # атомарно: обрыв записи не оставит битый JSON
         _CACHE = data
         try:
             _CACHE_MTIME = _PATH.stat().st_mtime

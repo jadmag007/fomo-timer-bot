@@ -6,6 +6,7 @@
 import asyncio
 import html
 import logging
+import sys
 import time
 
 from aiogram import Bot, Dispatcher
@@ -19,6 +20,7 @@ import api_poller
 import config
 import db
 import handlers
+import pause_state
 import timers
 import watcher
 import webapp_server
@@ -32,6 +34,7 @@ BOT_COMMANDS = [
     BotCommand(command="tz", description="🌍 Часовой пояс"),
     BotCommand(command="api", description="🤖 Статус автотрекинга"),
     BotCommand(command="ask", description="🔔 Подтверждение таймеров вкл/выкл"),
+    BotCommand(command="pause", description="⏸ Пауза: остановить/вернуть пуши"),
     BotCommand(command="trace", description="🧪 Трассировка API вкл/выкл"),
     BotCommand(command="help", description="❓ Справка"),
 ]
@@ -184,12 +187,16 @@ async def main():
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
     if not config.BOT_TOKEN:
-        raise SystemExit(
+        # Код 2 = ошибка конфигурации: start.bat отличает её от падения и НЕ
+        # устраивает бесконечный цикл «перезапуск через 5 секунд».
+        print(
             "Не задан BOT_TOKEN.\n"
             "1) Скопируйте .env.example в .env\n"
             "2) Вставьте токен от @BotFather\n"
-            "3) Запустите снова. Подробности — в README.md"
+            "3) Запустите снова. Подробности — в README.md",
+            file=sys.stderr,
         )
+        raise SystemExit(2)
 
     db.init()
 
@@ -217,6 +224,9 @@ async def main():
     me = await bot.get_me()
     log.info("Fomo Timer Bot v%s запущен: @%s (id=%s)",
              config.APP_VERSION, me.username, me.id)
+    if pause_state.is_paused():
+        log.warning("Бот запущен НА ПАУЗЕ (data/pause.json) — пуши не отправляются, "
+                    "снять: кнопка «Продолжить» в меню или /пауза")
     await dp.start_polling(bot)
 
 
