@@ -12,10 +12,9 @@ _ENV_PATH = str(Path(__file__).resolve().parent / ".env")
 load_dotenv(_ENV_PATH)
 
 # --- Версия. ПРАВИЛО: бампается при КАЖДОМ изменении кода/документации ---
-# 0.1.0.1 — промежуточный релиз: github_push.bat сам распаковывает zip перед
-# пушем; по код-ревью: сетевой сбой больше не считается «мёртвым ключом»,
-# блокировка SQLite на потоки, атомарные записи, чистки БД и token_updates.
-APP_VERSION = "0.1.0.1"
+# 0.1.0.2 — локальный режим мини-аппа: страница работает в браузере на ПК с
+# ботом без Telegram-подписи (спасение при error 1033, когда сеть режет туннель).
+APP_VERSION = "0.1.0.2"
 
 # --- Основное ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -79,6 +78,12 @@ WEBAPP_PUBLIC_URL = os.getenv("WEBAPP_PUBLIC_URL", "").strip().rstrip("/")
 # Транспорт туннеля: auto (по очереди http2/TCP и quic/UDP), http2 или quic.
 # Если провайдер режет только один из портов 7844 — зафиксируйте рабочий.
 TUNNEL_PROTOCOL = os.getenv("WEBAPP_TUNNEL_PROTOCOL", "auto").strip().lower()
+# ЛОКАЛЬНЫЙ режим мини-аппа: страница http://127.0.0.1:PORT открывается в
+# обычном браузере НА КОМПЬЮТЕРЕ С БОТОМ без Telegram-подписи (доступ как у
+# владельца). Спасение, когда сеть режет туннель (Cloudflare error 1033).
+# Безопасно: сервер слушает только 127.0.0.1, а у запросов из интернета через
+# туннель всегда есть служебные заголовки Cloudflare — они отсекаются.
+WEBAPP_LOCAL_DEBUG = os.getenv("WEBAPP_LOCAL_DEBUG", "true").strip().lower() == "true"
 
 # --- Юзербот (свежая initData автоматически, логин один раз через login_bot.bat) ---
 # По умолчанию — общедоступная пара Telegram Desktop; можно вписать свою из
@@ -206,6 +211,7 @@ def reload():
     global FOMO_WEB_ORIGIN, USERBOT_API_ID, USERBOT_API_HASH, USERBOT_SESSION_PATH
     global FOMO_ALL_INTERVAL, SIEGE_PREWARN_SEC  # без этого reload писал бы в локальную переменную
     global WEBAPP_ENABLED, WEBAPP_PORT, WEBAPP_PUBLIC_URL, TUNNEL_PROTOCOL
+    global WEBAPP_LOCAL_DEBUG
     try:
         load_dotenv(_ENV_PATH, override=True)
     except Exception:
@@ -251,6 +257,7 @@ def reload():
         WEBAPP_PORT = 8080
     WEBAPP_PUBLIC_URL = os.getenv("WEBAPP_PUBLIC_URL", "").strip().rstrip("/")
     TUNNEL_PROTOCOL = os.getenv("WEBAPP_TUNNEL_PROTOCOL", "auto").strip().lower()
+    WEBAPP_LOCAL_DEBUG = os.getenv("WEBAPP_LOCAL_DEBUG", "true").strip().lower() == "true"
     try:
         USERBOT_API_ID = int(os.getenv("USERBOT_API_ID", "6") or 6)
     except ValueError:

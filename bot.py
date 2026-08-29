@@ -112,7 +112,7 @@ async def _apply_webapp_url(bot: Bot, url: str):
     await _announce_url(bot, url)
 
 
-async def _announce_blocked(bot: Bot, reason: str):
+async def _announce_blocked(bot: Bot, reason: str, port: int = 0):
     """Туннель не подтвердился (сеть режет 7844) — сообщить владельцу.
 
     Важно НЕ промолчать: раньше бот писал «туннель поднят», пользователь жал
@@ -120,6 +120,8 @@ async def _announce_blocked(bot: Bot, reason: str):
     мёртвой кнопки приходит понятный диагноз и что делать. Кнопку меню при
     этом не трогаем — просто ждём, пока сеть пропустит туннель (bot
     перепроверяет сам каждые несколько минут и пришлёт свежую кнопку).
+    Заодно подсказываем про локальный режим: на этом же ПК мини-апп уже
+    работает в браузере и без туннеля (WEBAPP_LOCAL_DEBUG).
     """
     now = time.monotonic()
     if now - _LAST_BLOCKED["at"] < BLOCKED_COOLDOWN:
@@ -128,6 +130,12 @@ async def _announce_blocked(bot: Bot, reason: str):
     ids = webapp_server.allowed_user_ids()
     if not ids:
         return
+    local_hint = ""
+    if getattr(config, "WEBAPP_LOCAL_DEBUG", True) and int(port or 0) > 0:
+        local_hint = ("\n\n💡 Не ждать туннеля: таймеры уже сейчас видно в "
+                      "браузере НА ЭТОМ ПК — "
+                      "<code>http://127.0.0.1:%d</code> (локальный режим "
+                      "мини-аппа)." % int(port))
     try:
         await bot.send_message(
             next(iter(ids)),
@@ -137,7 +145,8 @@ async def _announce_blocked(bot: Bot, reason: str):
             "• включить VPN на компьютере, где запущен бот (VPN на телефоне "
             "не считается — туннель поднимает именно ПК);\n"
             "• или вписать свой адрес в <code>WEBAPP_PUBLIC_URL</code> в "
-            ".env (VPS/свой туннель).\n\n"
+            ".env (VPS/свой туннель)."
+            + local_hint + "\n\n"
             "🔄 Бот перепроверяет сам каждые несколько минут — как только "
             "туннель заработает, пришлю свежую кнопку.")
         log.warning("Мини-апп: владельцу сообщено о блокировке туннеля")
@@ -157,6 +166,9 @@ def start_webapp(bot: Bot, loop: asyncio.AbstractEventLoop):
     try:
         srv = webapp_server.start("127.0.0.1", config.WEBAPP_PORT)
         port = srv.server_address[1]
+        if getattr(config, "WEBAPP_LOCAL_DEBUG", True):
+            log.info("Мини-апп: ЛОКАЛЬНЫЙ режим включён — на этом ПК страница "
+                     "работает в браузере: http://127.0.0.1:%d", port)
     except OSError as e:
         log.warning("Мини-апп: веб-сервер не запущен (%s) — пуши продолжат "
                     "работать, только без экрана таймеров", e)
@@ -178,7 +190,7 @@ def start_webapp(bot: Bot, loop: asyncio.AbstractEventLoop):
         on_down=lambda: asyncio.run_coroutine_threadsafe(
             _apply_webapp_url(bot, ""), loop),
         on_blocked=lambda reason: asyncio.run_coroutine_threadsafe(
-            _announce_blocked(bot, reason), loop))
+            _announce_blocked(bot, reason, port), loop))
 
 
 async def main():

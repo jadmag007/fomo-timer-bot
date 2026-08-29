@@ -14,7 +14,13 @@
   * доступ защищён подписью initData (официальная схема Telegram Mini Apps):
     страница получает initData при открытии и передаёт её в заголовке
     «Authorization: tma …», сервер проверяет HMAC подпись бота и то, что
-    пользователь — владелец бота. Чужой по ссылке ничего не получит (401).
+    пользователь — владелец бота. Чужой по ссылке ничего не получит (401);
+  * ЛОКАЛЬНЫЙ режим (WEBAPP_LOCAL_DEBUG, по умолчанию включён): запрос с
+    этого же ПК без Telegram-подписи — это владелец в обычном браузере
+    (http://127.0.0.1:PORT). Спасение, когда сеть режет туннель (error
+    1033). Трафик из интернета через туннель НЕ проходит: у него всегда
+    есть служебные заголовки Cloudflare, а Host — не локальный (см.
+    local_mode_ok).
 
 API (все требуют заголовок Authorization: tma <initData>):
   GET  /api/state     — всё для отрисовки: таймеры, группы, настройки, статус
@@ -49,6 +55,16 @@ INITDATA_MAX_AGE = 30 * 24 * 3600
 
 # Максимальный размер тела POST (наши запросы — десятки байт)
 BODY_MAX = 16 * 1024
+
+# Служебные заголовки, которые Cloudflare/cloudflared добавляет ЛЮБОМУ
+# запросу из интернета. Локальный браузер их не шлёт — по ним отличаем
+# трафик через туннель от владельца, открывшего страницу на этом же ПК.
+TUNNEL_MARKERS = frozenset(
+    ("cf-connecting-ip", "cf-ray", "cf-worker", "x-forwarded-for",
+     "x-forwarded-proto", "x-real-ip"))
+
+# Раз в час напоминаем в лог, что локальный режим активен (не на каждый запрос)
+_LOCAL_LOGGED = {"at": 0.0}
 
 # --- Провайдеры, которые bot.py связывает с живым ботом (для тестов — заглушки)
 _PUBLIC_URL = ""        # текущий публичный HTTPS-адрес мини-аппа
@@ -149,7 +165,46 @@ def _bucket_order():
     return {k: i for i, k in enumerate(known)}
 
 
-def build_state(now=None):
+def local_mode_ok(client_host="", header_names=(), host_header="",
+                  server_port=0, enabled=None) -> bool:
+    """Это запрос владельца с того же ПК (браузер), а не из интернета?
+
+    Локальный режим разрешает доступ без Telegram-подписи ТОЛЬКО когда
+    сходится ВСЁ:
+      * режим включён (WEBAPP_LOCAL_DEBUG в .env, по умолчанию true);
+      * запрос пришёл с loopback (127.0.0.1 / ::1) — сервер снаружи не виден;
+      * среди заголовков нет ни одного из TUNNEL_MARKERS — cloudflared
+        добавляет их каждому запросу из интернета, значит через туннель
+        придёт чужой, и ему тут нечего делать;
+      * заголовок Host — локальный с нашим портом (у туннельного трафика
+        Host = адрес trycloudflare.com).
+    Отдельная функция — чтобы покрывать тестами без HTTP.
+    """
+    if enabled is None:
+        enabled = bool(getattr(config, "WEBAPP_LOCAL_DEBUG", True))
+    if not enabled:
+        return False
+    if (client_host or "") not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+        return False
+    headers = {str(h).lower() for h in (header_names or ())}
+    if headers & TUNNEL_MARKERS:
+        return False
+    hh = (host_header or "").strip().lower()
+    if hh:
+        if ":" not in hh:
+            return False          # браузер всегда шлёт Host с портом
+        hostpart, _, portpart = hh.rpartition(":")
+        try:
+            if int(portpart) != int(server_port or 0):
+                return False
+        except ValueError:
+            return False
+        if hostpart.strip("[]") not in ("127.0.0.1", "localhost", "::1"):
+            return False
+    return True
+
+
+def build_state(now=None, local=False):
     """Всё, что нужно странице для отрисовки (и тестам — для проверки)."""
     now = now if now is not None else time.time()
     prefs = webapp_prefs.snapshot()
@@ -204,6 +259,7 @@ def build_state(now=None):
         "settings": {"all": prefs["all"], "muted": {b: True for b in prefs["buckets"]}},
         "api": st,
         "app": {"url": current_url(), "refresh": _REFRESH_SUBMIT is not None,
+                "local": bool(local),
                 "game_url": f"https://t.me/{config.FOMO_GAME_BOT}/{config.FOMO_APP_NAME}"},
     }
 
@@ -251,14 +307,46 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": False, "error": msg}, code)
 
     def _auth(self):
-        """Проверить Authorization: tma <initData>. -> user_id или None."""
+        """Проверить Authorization: tma <initData>. -> user_id или None.
+
+        Без подписи, но с этого же ПК (браузер владельца) — локальный режим:
+        доступ как у владельца (см. local_mode_ok и WEBAPP_LOCAL_DEBUG).
+        """
         header = self.headers.get("Authorization", "")
         raw = header[4:].strip() if header.lower().startswith("tma ") else ""
         ok, user_id, why = validate_init_data(raw, config.BOT_TOKEN,
                                               allowed_user_ids())
-        if not ok:
+        if ok:
+            self._local = False
+            return user_id
+        if not raw:
+            ids = allowed_user_ids()
+            if ids and local_mode_ok(
+                    self.client_address[0] if self.client_address else "",
+                    self.headers.keys(), self.headers.get("Host", ""),
+                    self.server.server_address[1]):
+                self._local = True
+                uid = next(iter(ids))
+                now = time.time()
+                if now - _LOCAL_LOGGED["at"] > 3600:
+                    _LOCAL_LOGGED["at"] = now
+                    log.info("Мини-апп: ЛОКАЛЬНЫЙ режим — страница в браузере "
+                             "этого ПК работает без Telegram-подписи "
+                             "(владелец id=%s)", uid)
+                return uid
+        elif raw:
             log.info("Мини-апп: отказ в доступе (%s)", why)
-        return user_id if ok else None
+        return None
+
+    def _deny(self):
+        """401 с подсказкой про оба входа: Telegram и локальный браузер."""
+        try:
+            port = int(self.server.server_address[1])
+        except Exception:
+            port = 8080
+        self._fail(401, "Открой мини-апп через Telegram (кнопка меню у бота) "
+                        "или в браузере на компьютере с ботом: "
+                        "http://127.0.0.1:%d" % port)
 
     def _read_json(self):
         try:
@@ -288,10 +376,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/state":
             if self._auth() is None:
-                self._fail(401, "Открой мини-апп через Telegram (кнопка меню у бота)")
+                self._deny()
                 return
             try:
-                self._json(build_state())
+                self._json(build_state(local=getattr(self, "_local", False)))
             except Exception as e:
                 log.exception("api/state ошибка")
                 self._fail(500, str(e)[:200])
@@ -304,7 +392,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         user_id = self._auth()
         if user_id is None:
-            self._fail(401, "Открой мини-апп через Telegram (кнопка меню у бота)")
+            self._deny()
             return
         data = self._read_json()
         if data is None:

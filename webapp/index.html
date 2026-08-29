@@ -154,8 +154,10 @@
   <div>
     <div class="big">🔒</div>
     <b>Открой мини-апп через Telegram</b>
-    <p>Эта страница работает только внутри Telegram: нажми кнопку меню (☰)
-    слева от поля ввода у бота или отправь ему команду <code>/app</code>.</p>
+    <p>Эта страница работает внутри Telegram: нажми кнопку меню (☰)
+    слева от поля ввода у бота или отправь ему команду <code>/app</code>.
+    На компьютере с ботом она же открывается просто в браузере —
+    <b id="lockLocal">http://127.0.0.1:8080</b> (локальный режим).</p>
     <button id="btnRetry">Повторить</button>
   </div>
 </div>
@@ -285,12 +287,14 @@
 
   function render(){
     if (!STATE) return;
-    $("ver").textContent = "v" + STATE.version;
+    var isLocal = !!(STATE.app && STATE.app.local);
+    $("ver").textContent = "v" + STATE.version + (isLocal ? " · 🖥 локально" : "");
     var st = STATE.api || {};
     var stTxt, stKind = "ok";
     if (STATE.paused) { stTxt = "⏸ бот на паузе — пуши не приходят"; stKind = "warn"; }
-    else if (!STATE.app || !STATE.app.url) { stTxt = "мини-апп ещё поднимается…"; stKind = "warn"; }
     else if (st.token_dead) { stTxt = "ключ игры устарел — автотрекинг стоит"; stKind = "err"; }
+    else if (isLocal) { stTxt = "🖥 локальный режим — страница в браузере этого ПК"; }
+    else if (!STATE.app || !STATE.app.url) { stTxt = "мини-апп ещё поднимается…"; stKind = "warn"; }
     else if (st.last_poll) {
       stTxt = "игра: опрос " + agoStr(st.last_poll) + (st.last_status ? " · HTTP " + st.last_status : "");
     } else { stTxt = "автотрекинг ещё не опрашивал игру"; stKind = "warn"; }
@@ -498,10 +502,16 @@
   $("btnRetry").onclick = function(){ load(); };
   $("btnGame").onclick = function(){
     haptic();
-    if (STATE && STATE.app && STATE.app.game_url && tg && tg.openTelegramLink) {
-      tg.openTelegramLink(STATE.app.game_url);
-    }
+    var url = STATE && STATE.app && STATE.app.game_url;
+    if (!url) return;
+    if (tg && tg.openTelegramLink) tg.openTelegramLink(url);
+    else window.open(url, "_blank");   // локальный режим в браузере
   };
+
+  // на замке показать актуальный локальный адрес (если мы на этом ПК)
+  if (location.hostname === "127.0.0.1" || location.hostname === "localhost") {
+    $("lockLocal").textContent = location.origin;
+  }
 
   if (!AUTH) {
     // страница открыта не из Telegram: initData нет — покажем замок
