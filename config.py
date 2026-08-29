@@ -11,8 +11,8 @@ _ENV_PATH = str(Path(__file__).resolve().parent / ".env")
 
 load_dotenv(_ENV_PATH)
 
-# --- Версия. ПРАВИЛО: бампается при КАЖДОМ изменении кода/документации ---
-APP_VERSION = "0.0.2-alpha"
+# --- Версия (показывается в /start, /help, /апи и в логе при старте) ---
+APP_VERSION = "0.0.1-alpha"
 
 # --- Основное ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -53,9 +53,6 @@ FOMO_LANG = os.getenv("FOMO_LANG", "ru").strip()
 FOMO_WEB_ORIGIN = os.getenv("FOMO_WEB_ORIGIN", "https://game.fomofighters.xyz").strip().rstrip("/")
 # Превентивная реанимация ключа (auth), секунд
 FOMO_REAUTH_INTERVAL = int(os.getenv("FOMO_REAUTH_INTERVAL", "21600") or 21600)
-# Как часто опрашивать /user/data/all (клановые сундуки, награды аванпостов),
-# секунд. Лёгкий /user/data/timers ходит по API_POLL_INTERVAL.
-FOMO_ALL_INTERVAL = int(os.getenv("FOMO_ALL_INTERVAL", "300") or 300)
 
 # --- Юзербот (свежая initData автоматически, логин один раз через login_bot.bat) ---
 # По умолчанию — общедоступная пара Telegram Desktop; можно вписать свою из
@@ -209,10 +206,6 @@ def reload():
         FOMO_REAUTH_INTERVAL = int(os.getenv("FOMO_REAUTH_INTERVAL", "21600") or 21600)
     except ValueError:
         FOMO_REAUTH_INTERVAL = 21600
-    try:
-        FOMO_ALL_INTERVAL = int(os.getenv("FOMO_ALL_INTERVAL", "300") or 300)
-    except ValueError:
-        FOMO_ALL_INTERVAL = 300
     try:
         USERBOT_API_ID = int(os.getenv("USERBOT_API_ID", "6") or 6)
     except ValueError:

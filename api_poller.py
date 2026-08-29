@@ -16,14 +16,10 @@
 умирают при переподключении игры — тогда 401, и нужен свежий fomo.txt.
 
 Точный парсер Fomo Fighters: списки t* из ответа (tBuildings/tTroops/tSkills…)
-+ ЛЮБЫЕ поля-даты вне этих списков (кулдауны — метка «✨»). Переводы ключей —
-в translations.py. Неизвестные ключи показываются английским именем; чтобы
-найти их и перевести, включите трассировку (/трассировка) и пришлите себе
-файл лога (/трейслог).
-
-Клановые сундуки и награды аванпостов в /user/data/timers НЕ приходят — они
-в /user/data/all (списки stClanRewards/stOutpostRewards), этот эндпоинт бот
-опрашивает раз в FOMO_ALL_INTERVAL секунд (extract_all_timers).
++ ЛЮБЫЕ поля-даты вне этих списков (клановые сундуки, награды аванпостов,
+кулдауны — метка «✨»). Переводы ключей — в translations.py. Неизвестные
+ключи показываются английским именем; чтобы найти их и перевести, включите
+трассировку (/трассировка) и пришлите себе файл лога (/трейслог).
 """
 import asyncio
 import html
@@ -53,7 +49,6 @@ _SEEN_MAX = 20000
 # Снимок состояния для команды /api
 _STATE = {
     "last_poll": None,     # unix последнего ответа API
-    "last_all_poll": 0.0,  # unix последнего /user/data/all (клановые сундуки)
     "last_status": None,   # последний HTTP-код
     "last_error": "",      # последняя сетевая ошибка
     "token_dead": False,   # True, пока API отвечает 401/403
@@ -66,8 +61,8 @@ _STATE = {
 def reset_state():
     """Сброс после обновления токена (вызывает watcher)."""
     _SEEN.clear()
-    _STATE.update(last_poll=None, last_all_poll=0.0, last_status=None,
-                  last_error="", token_dead=False, dead_notified=False)
+    _STATE.update(last_poll=None, last_status=None, last_error="",
+                  token_dead=False, dead_notified=False)
 
 
 def state_urls():
@@ -161,25 +156,6 @@ async def _poll_fomo_native(bot=None) -> int:
                 added += maybe_add(up)
         if trace_mod.enabled():
             trace_mod.log_response("native", 200, data, found=found, added=added)
-
-        # Раз в FOMO_ALL_INTERVAL секунд: /user/data/all — клановые сундуки
-        # и награды аванпостов (в /user/data/timers их нет).
-        if time.time() - _STATE["last_all_poll"] >= max(60, config.FOMO_ALL_INTERVAL):
-            _STATE["last_all_poll"] = time.time()
-            try:
-                alld = await _FOMO.get_all(session)
-                found_all = extract_all_timers(alld)
-                if config.API_ASK_BEFORE_ADD:
-                    await propose_new(bot, found_all)
-                else:
-                    for up in found_all:
-                        added += maybe_add(up)
-                if trace_mod.enabled():
-                    trace_mod.log_response("all", 200, alld,
-                                           found=found_all, added=added)
-            except fomo_client.FomoAuthError as e:
-                # ключ жив (timers только что ответил) — просто пропустим цикл
-                log.warning("FOMO /user/data/all не удался: %s", str(e)[:120])
     return added
 
 
@@ -330,44 +306,6 @@ def extract_fomo(state_json, now=None):
                 continue
             out.append({"label": tr.item_label(ru, it), "ends_at": ends})
     out.extend(_extra_from_data(d, now))
-    return out
-
-
-def extract_all_timers(all_json, now=None):
-    """Разбор /user/data/all: клановые сундуки и награды аванпостов.
-
-    В data есть списки stClanRewards/stOutpostRewards — объекты {key,
-    dateStart, dateEnd} в том же UTC-формате, что и t*-списки; калибровка
-    по serverTime. Сами списки появляются только когда награда на перезарядке
-    (собрали — через dateEnd придёт «Готово», забрали — таймер исчезнет).
-    t*-списки из этого ответа НЕ разбираем — их каждый цикл отдаёт лёгкий
-    /user/data/timers (дедупликация всё равно защитила бы от дублей).
-    """
-    if not isinstance(all_json, dict):
-        return []
-    d = all_json.get("data")
-    if not isinstance(d, dict):
-        return []
-    now = now if now is not None else time.time()
-    try:
-        base = float(d.get("serverTime")) / 1000.0 if d.get("serverTime") else now
-    except (TypeError, ValueError):
-        base = now
-    out = []
-    for list_name in ("stClanRewards", "stOutpostRewards"):
-        items = d.get(list_name)
-        if not isinstance(items, list):
-            continue
-        for it in items[:60]:
-            if not isinstance(it, dict):
-                continue
-            ts = _parse_game_date(it.get("dateEnd"))
-            if ts is None:
-                continue
-            ends = now + (ts - base)
-            if ends < now - 300 or ends > now + 60 * 24 * 3600:
-                continue
-            out.append({"label": tr.reward_label(list_name, it), "ends_at": ends})
     return out
 
 

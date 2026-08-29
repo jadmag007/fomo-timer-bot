@@ -24,11 +24,6 @@
                (заголовок Api-Version, который игра выводит из hero.version,
                 для /user/data/timers необязателен — проверено живьём).
 
-  POST /user/data/all  — тот же формат, но больше данных: те же t*-списки
-               + stClanRewards (клановые сундуки на перезарядке),
-               stOutpostRewards (награды аванпостов), hero, clan, boxes…
-               Опрашивается реже (FOMO_ALL_INTERVAL) — ради наград.
-
 Свежая initData, когда старая окончательно перестанет приниматься, добывается
 юзерботом (userbot.py, Telethon): он открывает мини-апп t.me/fomo_fighters_bot/game
 от вашего имени и берёт initData из ссылки, которую выдаёт Telegram.
@@ -226,10 +221,9 @@ class FomoClient:
 
     # -- основной ход --
 
-    async def _signed_call(self, session, path: str, body_obj: dict) -> dict:
-        """Подписанный POST с само-лечением ключа (общий ход для всех
-        эндпоинтов): превентивный auth, повтор после 401, юзербот в крайнем
-        случае. Возвращает JSON или бросает FomoAuthError."""
+    async def get_timers(self, session) -> dict:
+        """POST /user/data/timers с самоподписью; при 401 — само-лечение.
+        Возвращает распарсенный JSON ответа или бросает FomoAuthError."""
         async with self._lock:
             # Превентивная реанимация ключа раз в FOMO_REAUTH_INTERVAL секунд
             # (сервер может инвалидировать ключ при переподключении игры).
@@ -237,15 +231,16 @@ class FomoClient:
                                        > max(600, config.FOMO_REAUTH_INTERVAL)):
                 await self.auth(session)
 
-            status, data = await self._post(session, path, body_obj)
+            status, data = await self._post(
+                session, "/user/data/timers", {"data": {"lang": self.lang}})
             if status == 200 and isinstance(data, dict) and data.get("success"):
                 return data
 
             err_code = (data or {}).get("error_code")
-            log.warning("FOMO %s: HTTP %s %s — реанимирую ключ",
-                        path, status, err_code)
+            log.warning("FOMO timers: HTTP %s %s — реанимирую ключ", status, err_code)
             if await self.auth(session):
-                status, data = await self._post(session, path, body_obj)
+                status, data = await self._post(
+                    session, "/user/data/timers", {"data": {"lang": self.lang}})
                 if status == 200 and isinstance(data, dict) and data.get("success"):
                     return data
 
@@ -255,7 +250,8 @@ class FomoClient:
                 self.init_data = fresh
                 config.set_fomo_init_data(fresh)   # сохранить в .env на будущее
                 if await self.auth(session):
-                    status, data = await self._post(session, path, body_obj)
+                    status, data = await self._post(
+                        session, "/user/data/timers", {"data": {"lang": self.lang}})
                     if status == 200 and isinstance(data, dict) and data.get("success"):
                         return data
             raise FomoAuthError(
@@ -263,18 +259,6 @@ class FomoClient:
                 "(ошибка %s/%s). Нужна свежая initData: запустите "
                 "login_bot.bat (юзербот) или положите свежий fomo.txt в "
                 "папку бота / token_updates." % (status, err_code or "—"))
-
-    async def get_timers(self, session) -> dict:
-        """POST /user/data/timers с самоподписью; при 401 — само-лечение.
-        Возвращает распарсенный JSON ответа или бросает FomoAuthError."""
-        return await self._signed_call(
-            session, "/user/data/timers", {"data": {"lang": self.lang}})
-
-    async def get_all(self, session) -> dict:
-        """POST /user/data/all: t*-списки + stClanRewards (клановые сундуки)
-        + stOutpostRewards (награды аванпостов). Само-лечение ключа то же."""
-        return await self._signed_call(
-            session, "/user/data/all", {"data": {"lang": self.lang}})
 
 
 def preview_init_data(init_data: str) -> str:

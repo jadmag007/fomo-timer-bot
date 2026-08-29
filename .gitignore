@@ -7,9 +7,6 @@
 .env
 github_repo.txt
 
-# --- Личная инструкция по GitHub (в публичный README не входит) ---
-GITHUB.md
-
 # --- Сессия юзербота = ваш вход в Telegram ---
 userbot.session
 *.session

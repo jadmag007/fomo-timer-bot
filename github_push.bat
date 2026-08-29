@@ -138,6 +138,6 @@ exit /b 0
 
 :fail
 echo.
-echo See GITHUB.md (personal guide) - there is a troubleshooting table.
+echo See README.md, section "GitHub" - there is a troubleshooting table.
 pause
 exit /b 1
