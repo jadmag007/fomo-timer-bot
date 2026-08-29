@@ -33,6 +33,7 @@ WEBAPP_PUBLIC_URL в .env, и cloudflared не понадобится вовсе
 """
 import logging
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -53,17 +54,31 @@ LOG_KEEP_BYTES = 128 << 10       # сколько хвоста оставляе�
 
 _URL_RE = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
 
-DOWNLOADS = {
-    ("win32", "cloudflared.exe"):
-        "https://github.com/cloudflare/cloudflared/releases/latest/download/"
-        "cloudflared-windows-amd64.exe",
-    ("linux", "cloudflared"):
-        "https://github.com/cloudflare/cloudflared/releases/latest/download/"
-        "cloudflared-linux-amd64",
-    ("darwin", "cloudflared"):
-        "https://github.com/cloudflare/cloudflared/releases/latest/download/"
-        "cloudflared-darwin-amd64",
-}
+DL_BASE = ("https://github.com/cloudflare/cloudflared/releases/latest/download/")
+
+
+def _download_choice(sysname="", machine=""):
+    """Подобрать сборку cloudflared под систему и архитектуру. -> (имя, url).
+
+    Аргументы — для тестов; по умолчанию берём реальную платформу.
+    Андроид в Termux — это linux aarch64: раньше там качался amd64-бинарник,
+    который не запускался (Exec format error) — теперь для arm64 своя сборка.
+    """
+    sysname = sysname or (
+        "win32" if sys.platform.startswith("win") else
+        ("darwin" if sys.platform == "darwin" else "linux"))
+    arch = (machine or platform.machine() or "").lower()
+    is_arm = arch in ("aarch64", "arm64", "armv8l")
+    if sysname == "win32":
+        return "cloudflared.exe", DL_BASE + "cloudflared-windows-amd64.exe"
+    if is_arm:
+        name = ("cloudflared-darwin-arm64" if sysname == "darwin"
+                else "cloudflared-linux-arm64")
+    else:
+        name = ("cloudflared-darwin-amd64" if sysname == "darwin"
+                else "cloudflared-linux-amd64")
+    return "cloudflared", DL_BASE + name
+
 # Пауза между попытками перезапуска упавшего туннеля. Раньше было 60 с —
 # за эту минуту кнопка меню вела на мёртвый адрес (Cloudflare error 1033).
 # 8 с: даже при падении простой почти незаметен.
@@ -186,11 +201,7 @@ def download_cloudflared(dest=None, timeout=180) -> Path:
     битый бинарник под финальным именем, ensure_binary его «находил» —
     и туннель вечно не поднимался.
     """
-    sysname = "win32" if sys.platform.startswith("win") else (
-        "darwin" if sys.platform == "darwin" else "linux")
-    fname = {"win32": "cloudflared.exe", "darwin": "cloudflared",
-             "linux": "cloudflared"}[sysname]
-    url = DOWNLOADS[(sysname, fname)]
+    fname, url = _download_choice()
     dest = Path(dest) if dest else ROOT / fname
     tmp = dest.with_name(dest.name + ".part")
     log.info("Мини-апп: скачиваю cloudflared (~20 МБ, один раз)…")

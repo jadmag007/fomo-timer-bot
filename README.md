@@ -6,7 +6,7 @@
 и в момент финиша придёт «Готово ✅». А если настроить автотрекинг, бот
 сам увидит таймеры из API игры и напомнит без единого нажатия.
 
-Текущая версия: **0.1.0.2** (видна в `/start`, `/апи` и в мини-аппе).
+Текущая версия: **0.1.0.3** (видна в `/start`, `/апи` и в мини-аппе).
 
 ---
 
@@ -39,6 +39,13 @@
 ./install.sh    # тот же шаг: окружение + токен
 ./start.sh
 ```
+
+### Android (Termux) 📱
+
+Тот же бот целиком на телефоне: `install.sh` и `start.sh` сами понимают
+Termux (wake-lock, готовый aiohttp без компиляции), туннель качает
+arm64-сборку cloudflared, мини-апп открывается в браузере того же телефона
+(`http://127.0.0.1:8080`). Пошаговая инструкция — **TERMUX.md**.
 
 Для работы 24/7 удобнее VPS (`install.sh` + `start.sh` в фоне или через
 `systemd/fomo-timer.service`) либо Docker (`docker-compose.yml`). Помните:
@@ -228,7 +235,8 @@ fomo-timer-bot/
 ├─ apitrace.py        # трассировка API (data/trace.log, ротация)
 ├─ tools/har_*.py     # разбор HAR-файлов (можно и без них — fomo.txt проще)
 ├─ install.bat / start.bat / update_token.bat / github_push.bat / login_bot.bat
-├─ install.sh / start.sh / login_bot.sh           # то же для macOS/Linux
+├─ install.sh / start.sh / login_bot.sh           # то же для macOS/Linux/Android
+├─ TERMUX.md                                       # гайд: бот на андроиде (Termux)
 ├─ systemd/, Dockerfile, docker-compose.yml       # для VPS
 └─ README.md / GITHUB.md / .env.example / .gitignore
 ```
@@ -257,6 +265,14 @@ fomo-timer-bot/
 
 ## История версий
 
+- **0.1.0.3** — Termux/Android: бот целиком живёт на телефоне. install.sh
+  и start.sh сами распознают Termux (wake-lock против «засыпания», готовый
+  python-aiohttp из репозитория Termux вместо десяти минут компиляции,
+  запуск без venv); tunnel.py качает arm64-сборку cloudflared (раньше на
+  андроиде был Exec format error); гайд TERMUX.md — установка, перенос с
+  ПК, автозапуск через Termux:Boot, правило «один бот = один экземпляр»
+  (иначе 409 Conflict). На мобильном интернете туннель часто работает —
+  у оператора порт 7844 обычно не заблокирован.
 - **0.1.0.2** — локальный режим мини-аппа: на компьютере с ботом страница
   открывается в обычном браузере (`http://127.0.0.1:8080`) без
   Telegram-подписи — спасение, когда провайдер режет туннель (error 1033).

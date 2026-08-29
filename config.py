@@ -14,7 +14,10 @@ load_dotenv(_ENV_PATH)
 # --- Версия. ПРАВИЛО: бампается при КАЖДОМ изменении кода/документации ---
 # 0.1.0.2 — локальный режим мини-аппа: страница работает в браузере на ПК с
 # ботом без Telegram-подписи (спасение при error 1033, когда сеть режет туннель).
-APP_VERSION = "0.1.0.2"
+# 0.1.0.3 — Termux/Android: install.sh и start.sh понимают Termux (wake-lock,
+# готовый aiohttp, без venv), tunnel.py качает arm64-сборку cloudflared,
+# гайд TERMUX.md.
+APP_VERSION = "0.1.0.3"
 
 # --- Основное ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
