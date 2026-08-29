@@ -107,6 +107,27 @@ def _rotate():
         log.exception("Не удалось ротировать trace.log")
 
 
+def log_event(source, text) -> bool:
+    """Записать в trace.log событие без снимка (например, ошибку all-опроса).
+
+    Раньше неудачный /user/data/all был виден только в консоли — пользователь
+    же смотрит trace.log (/трейслог). Теперь ошибка видна и там.
+    """
+    if not enabled():
+        return False
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _rotate()
+        ts = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        with LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write("=" * 74 + "\n"
+                    f"== {ts} · источник: {source} · СОБЫТИЕ\n{text}\n")
+        return True
+    except Exception:
+        log.exception("Не удалось записать trace.log")
+        return False
+
+
 def log_response(source, status, payload, found=None, added=0) -> bool:
     """Записать ответ API в trace.log. True — запись сделана.
     found — находки extract_fomo (что бот увидел), added — сколько поставил."""

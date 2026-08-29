@@ -21,14 +21,33 @@ CREATE TABLE IF NOT EXISTS timers(
     ends_at    REAL NOT NULL,
     created_at REAL NOT NULL,
     warn_sent  INTEGER NOT NULL DEFAULT 0,
-    done_sent  INTEGER NOT NULL DEFAULT 0
+    done_sent  INTEGER NOT NULL DEFAULT 0,
+    bucket     TEXT NOT NULL DEFAULT '',
+    prenote_sent INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_timers_due ON timers(done_sent, ends_at);
+CREATE INDEX IF NOT EXISTS idx_timers_prewarn ON timers(done_sent, prenote_sent, bucket);
 """
+
+# Миграции для баз, созданных прошлыми версиями: (колонка, определение).
+# Проверка по PRAGMA table_info — старая база получит недостающие колонки.
+_MIGRATE_COLUMNS = [
+    ("timers", "bucket", "TEXT NOT NULL DEFAULT ''"),
+    ("timers", "prenote_sent", "INTEGER NOT NULL DEFAULT 0"),
+]
+
+# Осадные таймеры, поставленные до появления bucket: опознаём по метке
+# (перевод группы tOutpostSiegesMine в translations.py — «🏰 Осада аутпоста»).
+_SIEGE_LABEL_PREFIX = "🏰 Осада аутпоста"
 
 
 def init(path=None):
-    """Открыть БД и создать таблицы при первом запуске."""
+    """Открыть БД, создать таблицы при первом запуске и дозалить колонки.
+
+    Порядок важен: сначала ALTER-миграция колонок (старая база), потом
+    схема с индексами (на свежей базе PRAGMA пуст — миграция пропустит),
+    и только затем backfill bucket по меткам.
+    """
     global _conn
     path = path or config.DB_PATH
     d = os.path.dirname(path)
@@ -36,9 +55,28 @@ def init(path=None):
         os.makedirs(d, exist_ok=True)
     _conn = sqlite3.connect(path, check_same_thread=False)
     _conn.row_factory = sqlite3.Row
+    _migrate_columns()
     _conn.executescript(SCHEMA)
+    _migrate_backfill()
     _conn.commit()
     return _conn
+
+
+def _migrate_columns():
+    """Добавить в старые базы недостающие колонки (без потери данных)."""
+    for table, col, ddl in _MIGRATE_COLUMNS:
+        cols = {r[1] for r in _conn.execute(f"PRAGMA table_info({table})")}
+        if cols and col not in cols:
+            _conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+
+
+def _migrate_backfill():
+    """Осадные таймеры из старых версий не имели bucket — заполняем по метке
+    (перевод группы tOutpostSiegesMine в translations.py — «🏰 Осада аутпоста»)."""
+    _conn.execute(
+        "UPDATE timers SET bucket=? WHERE bucket='' AND label LIKE ?",
+        ("tOutpostSiegesMine", _SIEGE_LABEL_PREFIX + "%"),
+    )
 
 
 def _db():
@@ -75,11 +113,13 @@ def set_tz(tg_id, tz):
 
 # ---------- Таймеры ----------
 
-def add_timer(tg_id, chat_id, label, ends_at, created_at=None):
+def add_timer(tg_id, chat_id, label, ends_at, created_at=None, bucket=""):
     cur = _db().execute(
-        "INSERT INTO timers(tg_id, chat_id, label, ends_at, created_at) "
-        "VALUES(?, ?, ?, ?, ?)",
-        (tg_id, chat_id, label, ends_at, created_at if created_at is not None else time.time()),
+        "INSERT INTO timers(tg_id, chat_id, label, ends_at, created_at, bucket) "
+        "VALUES(?, ?, ?, ?, ?, ?)",
+        (tg_id, chat_id, label, ends_at,
+         created_at if created_at is not None else time.time(),
+         bucket or ""),
     )
     _db().commit()
     return cur.lastrowid
@@ -115,6 +155,25 @@ def due_warn(now):
     ).fetchall()
 
 
+def due_prewarn(now):
+    """Осады аванпостов, по которым пора слать предупреждение T-1час.
+
+    Окно: осталось от 2 минут до SIEGE_PREWARN_SEC (+5с запас на тик).
+    Нижняя граница 2 мин — в последние секунды шуметь бессмысленно: вот-вот
+    придёт обычное «✅ Готово!». Ручные таймеры (bucket='') не задеваем.
+    SIEGE_PREWARN_SEC=0 — предупреждение выключено.
+    """
+    if config.SIEGE_PREWARN_SEC <= 0:
+        return []
+    floor = min(120, config.SIEGE_PREWARN_SEC)
+    return _db().execute(
+        "SELECT * FROM timers "
+        "WHERE done_sent=0 AND prenote_sent=0 AND bucket='tOutpostSiegesMine' "
+        "AND ends_at > ? AND ends_at - ? <= ? AND ends_at - ? > ?",
+        (now, now, config.SIEGE_PREWARN_SEC + 5, now, floor),
+    ).fetchall()
+
+
 def due_done(now):
     """Таймеры, время которых вышло (в т.ч. просроченные после офлайна бота)."""
     return _db().execute(
@@ -124,6 +183,11 @@ def due_done(now):
 
 def mark_warn(timer_id):
     _db().execute("UPDATE timers SET warn_sent=1 WHERE id=?", (timer_id,))
+    _db().commit()
+
+
+def mark_prewarn(timer_id):
+    _db().execute("UPDATE timers SET prenote_sent=1 WHERE id=?", (timer_id,))
     _db().commit()
 
 

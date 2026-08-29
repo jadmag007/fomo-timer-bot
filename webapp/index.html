@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>FOMO Таймеры</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root{
+    --bg: var(--tg-theme-bg-color, #17212b);
+    --sec: var(--tg-theme-secondary-bg-color, #232e3c);
+    --text: var(--tg-theme-text-color, #ffffff);
+    --hint: var(--tg-theme-hint-color, #8a97a5);
+    --link: var(--tg-theme-link-color, #6ab3f3);
+    --btn: var(--tg-theme-button-color, #5288c1);
+    --btntext: var(--tg-theme-button-text-color, #ffffff);
+    --danger: #e0665b;
+    --ok: #58c798;
+    --warn: #e8b04b;
+    --card: rgba(255,255,255,.045);
+    --line: rgba(255,255,255,.09);
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  html,body{margin:0; padding:0}
+  body{
+    background: var(--bg); color: var(--text);
+    font: 15px/1.45 -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    padding-bottom: calc(76px + env(safe-area-inset-bottom));
+    min-height: 100vh;
+  }
+  header{
+    position: sticky; top: 0; z-index: 10;
+    background: var(--bg);
+    padding: 12px 16px 10px;
+    border-bottom: 1px solid var(--line);
+  }
+  .hrow{display:flex; align-items:baseline; gap:8px}
+  .hrow h1{font-size:19px; margin:0; font-weight:700; letter-spacing:.2px}
+  .hrow .ver{color:var(--hint); font-size:12px; margin-left:auto}
+  .hstatus{margin-top:3px; font-size:12.5px; color:var(--hint); display:flex; align-items:center; gap:6px}
+  .dot{width:8px; height:8px; border-radius:50%; background:var(--ok); display:inline-block; flex:none}
+  .dot.warn{background:var(--warn)} .dot.err{background:var(--danger)}
+  main{padding: 12px 12px 4px}
+  .group{margin: 0 0 14px}
+  .ghead{display:flex; align-items:center; gap:8px; padding: 2px 6px 8px}
+  .ghead .gtitle{font-weight:700; font-size:15.5px}
+  .ghead .gcount{
+    color:var(--hint); font-size:12px; background:var(--card);
+    border-radius:10px; padding:1px 8px;
+  }
+  .ghead .bell{
+    margin-left:auto; border:none; background:var(--card); color:var(--text);
+    width:34px; height:30px; border-radius:9px; font-size:15px; cursor:pointer;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .ghead .bell.off{opacity:.55}
+  .card{
+    background: var(--sec); border-radius: 14px;
+    padding: 11px 13px 12px; margin-bottom: 8px;
+    border: 1px solid var(--line);
+    display: grid; grid-template-columns: 1fr auto; gap: 2px 10px;
+    position: relative;
+  }
+  .card.muted{opacity:.5}
+  .card .label{font-size:14.5px; font-weight:600; word-break:break-word; padding-right:2px}
+  .card .chip{font-size:11px; color:var(--warn); margin-top:2px}
+  .card .finish{font-size:12px; color:var(--hint); margin-top:2px}
+  .card .cd{
+    font-size:22px; font-weight:700; text-align:right;
+    font-variant-numeric: tabular-nums; letter-spacing:.5px; line-height:1.15;
+    font-family: "SF Mono", ui-monospace, Consolas, "Cascadia Mono", Menlo, monospace;
+  }
+  .card .cd small{font-size:11px; color:var(--hint); font-weight:400; display:block; letter-spacing:0}
+  .bar{
+    grid-column: 1 / -1; height: 5px; border-radius: 3px;
+    background: rgba(255,255,255,.08); overflow:hidden; margin-top:7px;
+  }
+  .bar i{display:block; height:100%; width:0%;
+    background: linear-gradient(90deg, var(--btn), var(--link));
+    border-radius:3px; transition: width .6s linear}
+  .card.done .bar i{background: var(--ok)}
+  .card.done .cd{color: var(--ok)}
+  .xbtn{
+    position:absolute; top:6px; right:8px; width:26px; height:26px;
+    border-radius:8px; border:none; background:transparent; color:var(--hint);
+    font-size:15px; cursor:pointer; line-height:1;
+  }
+  .xbtn:active{background:var(--card)}
+  .empty{
+    text-align:center; padding: 42px 22px 30px; color:var(--hint);
+  }
+  .empty .big{font-size:44px; margin-bottom:10px}
+  .empty b{color:var(--text); font-size:16px}
+  .empty p{margin:8px auto 0; max-width:320px; font-size:13.5px}
+  .empty .diag{
+    margin:16px auto 0; max-width:340px; text-align:left; font-size:12px;
+    background:var(--card); border-radius:10px; padding:9px 12px;
+  }
+  #bar{
+    position: fixed; left:0; right:0; bottom:0; z-index:20;
+    background: var(--bg);
+    border-top: 1px solid var(--line);
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+    display:flex; gap:8px;
+  }
+  #bar button{
+    flex:1; border:none; border-radius:12px; padding:12px 6px;
+    font-size:14.5px; font-weight:600; cursor:pointer;
+    background:var(--card); color:var(--text);
+  }
+  #bar button.primary{background:var(--btn); color:var(--btntext)}
+  #bar button.primary.busy{opacity:.65}
+  #bar button.alt.on{background:var(--warn); color:#1d1d1f}
+  #toast{
+    position:fixed; left:50%; bottom: calc(92px + env(safe-area-inset-bottom));
+    transform:translateX(-50%) translateY(8px); z-index:30;
+    background:rgba(0,0,0,.82); color:#fff; font-size:13.5px;
+    padding:9px 16px; border-radius:20px; opacity:0; pointer-events:none;
+    transition: opacity .25s, transform .25s; max-width:86vw; text-align:center;
+  }
+  #toast.show{opacity:1; transform:translateX(-50%) translateY(0)}
+  #lock{
+    display:none; position:fixed; inset:0; z-index:50; background:var(--bg);
+    align-items:center; justify-content:center; text-align:center; padding:30px;
+  }
+  #lock .big{font-size:52px} #lock b{display:block; margin:12px 0 6px; font-size:17px}
+  #lock p{color:var(--hint); font-size:14px; max-width:320px; margin:0 auto}
+  #lock button{margin-top:18px; border:none; border-radius:12px; padding:11px 26px;
+    background:var(--btn); color:var(--btntext); font-size:15px; font-weight:600}
+  #offline{
+    display:none; margin:0 12px 10px; padding:8px 12px; border-radius:10px;
+    background:rgba(224,102,91,.14); color:var(--danger); font-size:13px;
+  }
+  .spin{display:inline-block; animation: spin 1s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<header>
+  <div class="hrow">
+    <h1>🎯 FOMO Таймеры</h1>
+    <span class="ver" id="ver"></span>
+  </div>
+  <div class="hstatus">
+    <span class="dot" id="dot"></span>
+    <span id="status">подключаюсь…</span>
+  </div>
+</header>
+
+<div id="offline">Нет связи с ботом — показываю последние данные.</div>
+<main id="main"></main>
+
+<div id="lock">
+  <div>
+    <div class="big">🔒</div>
+    <b>Открой мини-апп через Telegram</b>
+    <p>Эта страница работает только внутри Telegram: нажми кнопку меню (☰)
+    слева от поля ввода у бота или отправь ему команду <code>/app</code>.</p>
+    <button id="btnRetry">Повторить</button>
+  </div>
+</div>
+
+<div id="bar">
+  <button id="btnGame">🎮 Игра</button>
+  <button id="btnRefresh" class="primary">🔄 Обновить</button>
+  <button id="btnMute">🔕 Тихий режим</button>
+</div>
+<div id="toast"></div>
+
+<script>
+(function(){
+  "use strict";
+  var tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+  var AUTH = "";
+  try {
+    if (tg) {
+      tg.ready(); tg.expand();
+      if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred("light");
+    }
+  } catch(e){}
+  AUTH = (tg && tg.initData) ? tg.initData : "";
+
+  var STATE = null;         // последний ответ /api/state
+  var POLL_MS = 30000;      // период фонового обновления
+  var pollTimer = null;
+  var busy = false;
+
+  function $(id){ return document.getElementById(id); }
+
+  function toast(text){
+    var t = $("toast");
+    t.textContent = text;
+    t.classList.add("show");
+    clearTimeout(t._tm);
+    t._tm = setTimeout(function(){ t.classList.remove("show"); }, 2200);
+  }
+
+  function haptic(kind){
+    try {
+      if (!tg || !tg.HapticFeedback) return;
+      if (kind === "ok") tg.HapticFeedback.notificationOccurred("success");
+      else tg.HapticFeedback.impactOccurred("light");
+    } catch(e){}
+  }
+
+  function pad(n){ return (n < 10 ? "0" : "") + n; }
+
+  function clock(sec){
+    sec = Math.max(0, Math.floor(sec));
+    var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    return (h > 0 ? h + ":" + pad(m) : pad(m)) + ":" + pad(s);
+  }
+
+  function finishStr(ts){
+    var d = new Date(ts * 1000);
+    return pad(d.getDate()) + "." + pad(d.getMonth() + 1) + " "
+         + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":"
+         + pad(d.getSeconds());
+  }
+
+  function agoStr(ts){
+    if (!ts) return "";
+    var s = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+    if (s < 5) return "только что";
+    if (s < 60) return s + " с назад";
+    return Math.floor(s / 60) + " мин назад";
+  }
+
+  // ---------- API ----------
+
+  function api(path, opts, cb){
+    opts = opts || {};
+    var h = opts.headers || {};
+    h["Authorization"] = "tma " + AUTH;
+    fetch(path, {
+      method: opts.method || "GET",
+      headers: h,
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+    }).then(function(r){
+      return r.json().then(function(j){ cb(r.status, j); },
+                          function(){ cb(r.status, {ok:false, error:"плохой ответ"}); });
+    }).catch(function(e){
+      cb(0, {ok:false, error: String(e)});
+    });
+  }
+
+  function load(silent){
+    if (busy) return;
+    if (!silent) $("status").textContent = "обновляю…";
+    api("/api/state", {}, function(code, j){
+      if (code === 401) { showLock(); return; }
+      $("lock").style.display = "none";
+      if (code === 0) {
+        setOnline("err", "нет связи с ботом");
+        $("offline").style.display = "block";
+        return; // данные остаются на экране
+      }
+      $("offline").style.display = "none";
+      if (!j.ok) { setOnline("err", j.error || "ошибка"); return; }
+      STATE = j;
+      render();
+      schedulePoll();
+    });
+  }
+
+  function schedulePoll(){
+    clearTimeout(pollTimer);
+    pollTimer = setTimeout(function(){ load(true); }, POLL_MS);
+  }
+
+  document.addEventListener("visibilitychange", function(){
+    if (!document.hidden) load(true);
+  });
+
+  function setOnline(kind, text){
+    var d = $("dot");
+    d.className = "dot" + (kind === "ok" ? "" : " " + kind);
+    $("status").textContent = text;
+  }
+
+  function showLock(){ $("lock").style.display = "flex"; $("dot").className = "dot err"; }
+
+  // ---------- Отрисовка ----------
+
+  function render(){
+    if (!STATE) return;
+    $("ver").textContent = "v" + STATE.version;
+    var st = STATE.api || {};
+    var stTxt, stKind = "ok";
+    if (!STATE.app || !STATE.app.url) { stTxt = "мини-апп ещё поднимается…"; stKind = "warn"; }
+    else if (st.token_dead) { stTxt = "ключ игры устарел — автотрекинг стоит"; stKind = "err"; }
+    else if (st.last_poll) {
+      stTxt = "игра: опрос " + agoStr(st.last_poll) + (st.last_status ? " · HTTP " + st.last_status : "");
+    } else { stTxt = "автотрекинг ещё не опрашивал игру"; stKind = "warn"; }
+    setOnline(stKind, stTxt);
+
+    var main = $("main");
+    main.innerHTML = "";
+
+    if (!STATE.timers.length) {
+      main.appendChild(emptyBlock());
+      renderBar();
+      return;
+    }
+
+    // группы в порядке сервера (как в translations.BUCKETS)
+    STATE.groups.forEach(function(g){
+      var sec = document.createElement("section");
+      sec.className = "group";
+      var head = document.createElement("div");
+      head.className = "ghead";
+      head.innerHTML = "<span class='gtitle'></span><span class='gcount'></span>";
+      head.querySelector(".gtitle").textContent = g.title;
+      head.querySelector(".gcount").textContent = g.count;
+      var bell = document.createElement("button");
+      bell.className = "bell" + (g.muted ? " off" : "");
+      bell.textContent = g.muted ? "🔕" : "🔔";
+      bell.title = g.muted ? "Включить пуши" : "Заглушить пуши";
+      bell.onclick = function(){ toggleBucket(g); };
+      head.appendChild(bell);
+      sec.appendChild(head);
+
+      STATE.timers.filter(function(t){ return t.bucket === g.key; })
+        .forEach(function(t){ sec.appendChild(card(t)); });
+      main.appendChild(sec);
+    });
+
+    renderBar();
+  }
+
+  function card(t){
+    var el = document.createElement("div");
+    el.className = "card" + (t.muted ? " muted" : "");
+    el.id = "t" + t.id;
+    el.innerHTML =
+      "<div class='label'></div>" +
+      "<div class='cd'>--:--<small></small></div>" +
+      "<div class='chip'></div>" +
+      "<div class='bar'><i></i></div>" +
+      "<button class='xbtn' title='Отменить'>✕</button>";
+    el.querySelector(".label").textContent = t.label;
+    var chip = el.querySelector(".chip");
+    if (t.siege) {
+      chip.textContent = "🚩 за час напомнит — пора отправлять войска";
+    } else {
+      chip.style.display = "none";
+    }
+    el.querySelector(".xbtn").onclick = function(){
+      haptic();
+      if (tg && tg.showConfirm) {
+        tg.showConfirm("Отменить «" + t.label + "»?", function(a){ if (a) cancelTimer(t.id); });
+      } else if (window.confirm) {
+        if (window.confirm("Отменить «" + t.label + "»?")) cancelTimer(t.id);
+      } else { cancelTimer(t.id); }
+    };
+    tickCard(t, el);
+    return el;
+  }
+
+  function tickCard(t, el){
+    var cd = el.querySelector(".cd"), small = el.querySelector(".cd small"),
+        bar = el.querySelector(".bar i");
+    if (!cd) return;
+    var now = Date.now() / 1000;
+    var left = t.ends_at - now;
+    if (left <= 0) {
+      el.classList.add("done");
+      cd.childNodes[0].nodeValue = "✅ Готово";
+      small.textContent = "финиш " + finishStr(t.ends_at);
+      if (bar) bar.style.width = "100%";
+      return;
+    }
+    cd.childNodes[0].nodeValue = clock(left);
+    small.textContent = "финиш " + finishStr(t.ends_at);
+    var dur = Math.max(1, t.ends_at - (t.created_at || t.ends_at - 3600));
+    var pct = Math.min(100, Math.max(0, (1 - left / dur) * 100));
+    if (bar) bar.style.width = pct.toFixed(1) + "%";
+  }
+
+  function tick(){
+    if (!STATE) return;
+    STATE.timers.forEach(function(t){
+      var el = document.getElementById("t" + t.id);
+      if (el) tickCard(t, el);
+    });
+    // строка «опрос N с назад» живёт сама между опросами
+    var st = STATE.api || {};
+    if (st.last_poll) {
+      var cur = $("status").textContent;
+      if (cur.indexOf("игра:") === 0) {
+        setOnline("ok", "игра: опрос " + agoStr(st.last_poll)
+                  + (st.last_status ? " · HTTP " + st.last_status : ""));
+      }
+    }
+  }
+  setInterval(tick, 1000);
+
+  function emptyBlock(){
+    var d = document.createElement("div");
+    d.className = "empty";
+    var st = STATE.api || {};
+    var diag;
+    if (st.token_dead) {
+      diag = "Ключ игры не принимается: положи свежий fomo.txt в папку бота или запусти login_bot.bat — и таймеры снова пойдут.";
+    } else if (!st.native) {
+      diag = "Автотрекинг не включён: положи fomo.txt в папку бота (см. README). Пока можно ставить таймеры кнопками в чате.";
+    } else {
+      diag = "Запусти улучшение в игре (или собери сундук/награду — они уйдут на перезарядку) — таймер появится здесь сам в течение пары минут.";
+    }
+    d.innerHTML = "<div class='big'>🧘</div><b>Сейчас всё спокойно</b>"
+      + "<p>Активных таймеров нет. Уведомления, как и раньше, придут в чат, "
+      + "когда время выйдет.</p>"
+      + "<div class='diag'></div>";
+    d.querySelector(".diag").textContent = diag;
+    return d;
+  }
+
+  // ---------- Действия ----------
+
+  function post(path, body, cb){
+    api(path, {method: "POST", body: body}, function(code, j){
+      if (code === 401) { showLock(); return; }
+      cb(j || {ok:false, error:"нет ответа"});
+    });
+  }
+
+  function toggleBucket(g){
+    haptic();
+    var want = !g.muted;
+    post("/api/settings", {bucket: g.key, muted: want}, function(j){
+      if (j.ok) {
+        g.muted = want;
+        toast(want ? "🔕 Пуши группы «" + g.title + "» выключены"
+                   : "🔔 Пуши группы «" + g.title + "» включены");
+        haptic("ok");
+        render();
+      } else toast(j.error || "не получилось");
+    });
+  }
+
+  function toggleAll(){
+    haptic();
+    var want = !(STATE && STATE.settings && STATE.settings.all);
+    post("/api/settings", {all: want}, function(j){
+      if (j.ok) {
+        if (STATE) STATE.settings.all = want;
+        toast(want ? "🔕 Тихий режим: пуши выключены полностью"
+                   : "🔔 Тихий режим выключен — пуши снова приходят");
+        haptic("ok");
+        render();
+      } else toast(j.error || "не получилось");
+    });
+  }
+
+  function cancelTimer(id){
+    post("/api/cancel", {id: id}, function(j){
+      if (j.ok) { toast("🗑 Таймер отменён"); haptic("ok"); load(true); }
+      else toast(j.error || "не получилось");
+    });
+  }
+
+  function refresh(){
+    if (busy) return;
+    busy = true;
+    var b = $("btnRefresh");
+    b.classList.add("busy");
+    b.innerHTML = "<span class='spin'>🔄</span> Обновляю…";
+    haptic();
+    post("/api/refresh", {}, function(j){
+      if (j.ok) toast("Опрашиваю игру — пара секунд…");
+      else if (j.error) toast(j.error);
+      setTimeout(function(){ finishRefresh(); load(true); }, 2500);
+    });
+    // страховка: кнопка не должна залипнуть
+    setTimeout(function(){ finishRefresh(); }, 8000);
+  }
+
+  function finishRefresh(){
+    busy = false;
+    var b = $("btnRefresh");
+    b.classList.remove("busy");
+    b.textContent = "🔄 Обновить";
+  }
+
+  function renderBar(){
+    var muteBtn = $("btnMute");
+    var allMuted = !!(STATE && STATE.settings && STATE.settings.all);
+    muteBtn.textContent = allMuted ? "🔕 Пуши выключены" : "🔕 Тихий режим";
+    muteBtn.className = "alt" + (allMuted ? " on" : "");
+    var game = $("btnGame");
+    game.style.display = (STATE && STATE.app && STATE.app.game_url) ? "" : "none";
+  }
+
+  $("btnRefresh").onclick = refresh;
+  $("btnMute").onclick = toggleAll;
+  $("btnRetry").onclick = function(){ load(); };
+  $("btnGame").onclick = function(){
+    haptic();
+    if (STATE && STATE.app && STATE.app.game_url && tg && tg.openTelegramLink) {
+      tg.openTelegramLink(STATE.app.game_url);
+    }
+  };
+
+  if (!AUTH) {
+    // страница открыта не из Telegram: initData нет — покажем замок
+    load(true);
+    setTimeout(function(){ if (!STATE) showLock(); }, 700);
+  } else {
+    load();
+  }
+})();
+</script>
+</body>
+</html>

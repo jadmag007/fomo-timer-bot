@@ -1,9 +1,15 @@
 """Планировщик напоминаний (без aiogram — тестируется отдельно).
 
 Каждую секунду смотрим в БД:
+  * due_prewarn — «за час до конца осады аванпоста» (успеть отправить войска);
   * due_warn — «через минуту» (ТОЛЬКО если WARN_ENABLED=true; по умолчанию выключено);
   * due_done — время вышло, шлём «✅ готово» (в т.ч. догоняем после офлайна бота).
 Таймеры живут в SQLite, поэтому перезапуск/падение бота ничего не теряет.
+
+Тихий режим из мини-аппа (кнопка меню ☰): если группа таймера заглушена
+(webapp_prefs.is_muted) — пуш НЕ отправляется вовсе, таймер тихо помечается
+обработанным. Включение звука возвращает пуши для будущих таймеров; накопленное
+по заглушенным группам не догоняется — всё видно в самом мини-аппе.
 """
 import asyncio
 import logging
@@ -12,6 +18,7 @@ import time
 import config
 import db
 import util
+import webapp_prefs
 
 log = logging.getLogger("timers")
 
@@ -20,6 +27,21 @@ def warn_text(row, tz):
     return (
         "⏳ <b>Через ~1 минуту завершится:</b>\n\n"
         f"🏷 {row['label']}\n"
+        f"🕐 финиш в {util.local_str(row['ends_at'], tz)}"
+    )
+
+
+def prewarn_text(row, tz):
+    """Предупреждение за час до конца осады аванпоста.
+
+    Остаток считаем в момент отправки: если бот был офлайн и опоздал,
+    в сообщении будет честное «осталось Xмин», а не «час».
+    """
+    left = max(0, int(row["ends_at"] - time.time()))
+    return (
+        "🚩 <b>Осада аванпоста скоро закончится — пора отправлять войска!</b>\n\n"
+        f"🏷 {row['label']}\n"
+        f"⏳ осталось {util.fmt_delta(left)}\n"
         f"🕐 финиш в {util.local_str(row['ends_at'], tz)}"
     )
 
@@ -48,13 +70,28 @@ async def tick(bot, now=None):
     now = now if now is not None else time.time()
 
     for row in db.due_done(now):
+        if webapp_prefs.is_muted(row["bucket"]):
+            db.mark_done(row["id"])   # тихий режим: без пуша, но и без догонялок
+            continue
         user = db.get_user(row["tg_id"])
         tz = util.safe_tz(user["tz"] if user else None)
         await _send(bot, row["chat_id"], done_text(row, tz))
         db.mark_done(row["id"])
 
+    for row in db.due_prewarn(now):
+        if webapp_prefs.is_muted(row["bucket"]):
+            db.mark_prewarn(row["id"])
+            continue
+        user = db.get_user(row["tg_id"])
+        tz = util.safe_tz(user["tz"] if user else None)
+        await _send(bot, row["chat_id"], prewarn_text(row, tz))
+        db.mark_prewarn(row["id"])
+
     if config.WARN_ENABLED:
         for row in db.due_warn(now):
+            if webapp_prefs.is_muted(row["bucket"]):
+                db.mark_warn(row["id"])
+                continue
             user = db.get_user(row["tg_id"])
             tz = util.safe_tz(user["tz"] if user else None)
             await _send(bot, row["chat_id"], warn_text(row, tz))
@@ -62,7 +99,9 @@ async def tick(bot, now=None):
 
 
 async def scheduler_loop(bot):
-    log.info("Планировщик запущен (T-1мин: %s)", "вкл" if config.WARN_ENABLED else "выкл")
+    log.info("Планировщик запущен (осады T-%sмин · T-1мин: %s)",
+             config.SIEGE_PREWARN_SEC // 60,
+             "вкл" if config.WARN_ENABLED else "выкл")
     while True:
         try:
             await tick(bot)

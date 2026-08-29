@@ -11,8 +11,8 @@ _ENV_PATH = str(Path(__file__).resolve().parent / ".env")
 
 load_dotenv(_ENV_PATH)
 
-# --- Версия (показывается в /start, /help, /апи и в логе при старте) ---
-APP_VERSION = "0.0.1-alpha"
+# --- Версия. ПРАВИЛО: бампается при КАЖДОМ изменении кода/документации ---
+APP_VERSION = "0.0.4-alpha"
 
 # --- Основное ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -53,6 +53,26 @@ FOMO_LANG = os.getenv("FOMO_LANG", "ru").strip()
 FOMO_WEB_ORIGIN = os.getenv("FOMO_WEB_ORIGIN", "https://game.fomofighters.xyz").strip().rstrip("/")
 # Превентивная реанимация ключа (auth), секунд
 FOMO_REAUTH_INTERVAL = int(os.getenv("FOMO_REAUTH_INTERVAL", "21600") or 21600)
+# Как часто опрашивать /user/data/all (клановые сундуки, награды аванпостов),
+# секунд. Лёгкий /user/data/timers ходит по API_POLL_INTERVAL.
+FOMO_ALL_INTERVAL = int(os.getenv("FOMO_ALL_INTERVAL", "300") or 300)
+# За сколько секунд до конца ОСАДЫ АВАНПОСТА прислать отдельное предупреждение
+# («успейте отправить войска»). По умолчанию — за час.
+SIEGE_PREWARN_SEC = int(os.getenv("SIEGE_PREWARN_SEC", "3600") or 3600)
+
+# --- Мини-приложение в боте (кнопка меню слева от поля ввода) ---
+# Веб-страница со всеми таймерами сразу и кнопками управления (тихий режим
+# по группам, отмена таймера, обновление). Уведомления работают как раньше.
+# Для открытия из Telegram нужен публичный HTTPS-адрес: бот сам поднимает
+# бесплатный туннель cloudflared (при первом запуске скачает ~20 МБ).
+# URL туннеля меняется при каждом рестарте — кнопка меню обновляется сама.
+WEBAPP_ENABLED = os.getenv("WEBAPP_ENABLED", "true").strip().lower() == "true"
+# Локальный порт веб-сервера (слушает только 127.0.0.1). Если занят — берёт
+# следующий свободный.
+WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "8080") or 8080)
+# Свой публичный HTTPS-адрес (свой туннель/VPS). Пусто — бот поднимает
+# cloudflared сам. Пример: https://my-timer.example.com
+WEBAPP_PUBLIC_URL = os.getenv("WEBAPP_PUBLIC_URL", "").strip().rstrip("/")
 
 # --- Юзербот (свежая initData автоматически, логин один раз через login_bot.bat) ---
 # По умолчанию — общедоступная пара Telegram Desktop; можно вписать свою из
@@ -176,6 +196,8 @@ def reload():
     global API_ASK_BEFORE_ADD, API_METHOD, API_BODY, API_HEADERS_JSON, API_TRACE
     global FOMO_INIT_DATA, FOMO_API_BASE, FOMO_GAME_BOT, FOMO_APP_NAME, FOMO_LANG, FOMO_REAUTH_INTERVAL
     global FOMO_WEB_ORIGIN, USERBOT_API_ID, USERBOT_API_HASH, USERBOT_SESSION_PATH
+    global FOMO_ALL_INTERVAL, SIEGE_PREWARN_SEC  # без этого reload писал бы в локальную переменную
+    global WEBAPP_ENABLED, WEBAPP_PORT, WEBAPP_PUBLIC_URL
     try:
         load_dotenv(_ENV_PATH, override=True)
     except Exception:
@@ -206,6 +228,20 @@ def reload():
         FOMO_REAUTH_INTERVAL = int(os.getenv("FOMO_REAUTH_INTERVAL", "21600") or 21600)
     except ValueError:
         FOMO_REAUTH_INTERVAL = 21600
+    try:
+        FOMO_ALL_INTERVAL = int(os.getenv("FOMO_ALL_INTERVAL", "300") or 300)
+    except ValueError:
+        FOMO_ALL_INTERVAL = 300
+    try:
+        SIEGE_PREWARN_SEC = int(os.getenv("SIEGE_PREWARN_SEC", "3600") or 3600)
+    except ValueError:
+        SIEGE_PREWARN_SEC = 3600
+    WEBAPP_ENABLED = os.getenv("WEBAPP_ENABLED", "true").strip().lower() == "true"
+    try:
+        WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "8080") or 8080)
+    except ValueError:
+        WEBAPP_PORT = 8080
+    WEBAPP_PUBLIC_URL = os.getenv("WEBAPP_PUBLIC_URL", "").strip().rstrip("/")
     try:
         USERBOT_API_ID = int(os.getenv("USERBOT_API_ID", "6") or 6)
     except ValueError:

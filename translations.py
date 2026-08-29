@@ -38,9 +38,11 @@ BUCKETS = {
     "tOutpostSiegesMine": "🏰 Осада аутпоста",
     "tOutpostDefensesMine": "🛡 Оборона аутпоста",
     "tOutpostMarchesMine": "🧭 Марш аутпоста",
-    # ↓ допишите новые группы из trace.log, например:
-    # "tClanChests": "🎁 Клановый сундук",
-    # "tOutpostRewards": "📦 Награда аванпоста",
+    # Награды из /user/data/all (списки st* — не t*): клановые сундуки и
+    # награды аванпостов. Бот опрашивает этот эндпоинт раз в
+    # FOMO_ALL_INTERVAL секунд и ставит таймеры по dateEnd.
+    "stClanRewards": "🎁 Клановый сундук",
+    "stOutpostRewards": "📦 Награда аванпоста",
 }
 
 # ---------- Здания (buildingKey) ----------
@@ -67,6 +69,36 @@ TROOPS = {
 SKILLS = {
     # Пример: "load_1": "Грузоподъёмность I",
 }
+
+# ---------- Награды: клановые сундуки и аванпосты (st*-списки /user/data/all) ----------
+# Механика клановых сундуков (проверено по dbClanRewards из /dbs и игроком):
+#   сундук clan_N доступен с уровня клана N, перезарядка N часов (1..30),
+#   собрать всё сразу — кнопка в игре (/clan/rewards/claim-all);
+#   пока сундук на перезарядке, он приходит в stClanRewards {key, dateEnd}.
+# Награды аванпостов: ключ avanpost_r<кольцо>_lvl_<уровень>, перезарядка
+# по таблице dbOutpostRewards (r1_lvl_1 — каждые 4 часа, r1_lvl_2 — 24 ч…).
+_CLAN_KEY_RE = re.compile(r"^clan_(\d+)$")
+_OUTPOST_KEY_RE = re.compile(r"^avanpost_r(\d+)_lvl_(\d+)$")
+
+
+def reward_label(list_name, item) -> str:
+    """Подпись награды из st*-списков /user/data/all.
+
+    clan_7            -> «🎁 Клановый сундук · 7 ч» (часы = номер сундука)
+    avanpost_r1_lvl_1 -> «📦 Награда аванпоста · кольцо 1, ур. 1»
+    неизвестный ключ  -> «<группа>: <приличное имя ключа>»
+    """
+    base = bucket(list_name)
+    key = item.get("key") if isinstance(item, dict) else None
+    if not key:
+        return base
+    m = _CLAN_KEY_RE.match(str(key))
+    if m:
+        return f"{base} · {int(m.group(1))} ч"
+    m = _OUTPOST_KEY_RE.match(str(key))
+    if m:
+        return f"{base} · кольцо {m.group(1)}, ур. {m.group(2)}"
+    return f"{base}: {pretty(key)}"
 
 _CAMEL_RE = re.compile(r"(?<=[a-z0-9])([A-Z])")
 

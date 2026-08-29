@@ -31,12 +31,14 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    WebAppInfo,
 )
 
 import api_poller
 import config
 import db
 import apitrace as trace_mod
+import webapp_server
 from util import fmt_clock, fmt_delta, local_str, parse_duration, safe_tz
 
 router = Router()
@@ -56,7 +58,8 @@ MENU_TEXT = (
     "Запустили улучшение в игре → тапните длительность (или пришлите "
     "<code>/т 22:24</code>) — и в момент финиша придёт «Готово ✅».\n"
     "Формат как в игре: <code>22:24</code> = 22 мин 24 с, "
-    "<code>1:28:10</code> = 1 ч 28 м 10 с.\n\n"
+    "<code>1:28:10</code> = 1 ч 28 м 10 с.\n"
+    "🎯 Все таймеры на одном экране: кнопка меню ☰ или <code>/app</code>.\n\n"
     f"🧪 <i>Fomo Timer Bot v{config.APP_VERSION}</i>"
 )
 
@@ -100,6 +103,19 @@ def clamp_seconds(sec):
     return max(config.MIN_TIMER_SEC, min(int(sec), config.MAX_TIMER_SEC))
 
 
+def miniapp_button():
+    """Кнопка «🎯 Мини-апп» (web_app), если публичный адрес уже известен.
+
+    Адрес туннеля появляется не мгновенно (cloudflared поднимается) — тогда
+    кнопки просто нет, а /app объяснит, что происходит.
+    """
+    url = webapp_server.current_url()
+    if not url:
+        return None
+    return InlineKeyboardButton(text="🎯 Мини-апп: все таймеры",
+                                web_app=WebAppInfo(url=url))
+
+
 def kb_main(tg_id):
     """Главное меню = просто чипы длительностей."""
     rows = []
@@ -112,6 +128,9 @@ def kb_main(tg_id):
         InlineKeyboardButton(text="✍️ Своё время", callback_data="cust"),
         InlineKeyboardButton(text="📋 Таймеры", callback_data="list"),
     ])
+    app_btn = miniapp_button()
+    if app_btn:
+        rows.append([app_btn])
     rows.append([
         InlineKeyboardButton(text=f"🌍 {user_tz(tg_id).key}",
                              callback_data="tz"),
@@ -235,6 +254,9 @@ def help_text():
         "<code>/трассировка</code> — лог сырых ответов API вкл/выкл\n"
         "<code>/трейслог</code> — прислать файл trace.log · "
         "<code>/help</code> — справка\n\n"
+        "<b>🎯 Мини-апп</b>: кнопка меню (☰) слева от поля ввода или <code>/app</code> — "
+        "все таймеры сразу, живые отсчёты, тихий режим по группам, отмена. "
+        "Уведомления в чат приходят как раньше.\n\n"
         "<b>Автотрекинг:</b> положите <code>fomo.txt</code> в папку бота или в "
         "<code>token_updates</code> — таймеры будут ставиться сами, без "
         "вопросов. Не отображаются клановые сундуки/награды аванпостов? "
@@ -281,8 +303,26 @@ def api_status_text():
         lines.append("🧪 Трассировка: ВКЛ — пишу сырые ответы API (файл: /трейслог)")
     if st["last_poll"]:
         lines.append(f"Последний опрос: {int(time.time() - st['last_poll'])} с назад · HTTP {st['last_status']}")
+    # Клановые сундуки / награды аванпостов (/user/data/all) — отдельный статус:
+    # именно по этому опросу ставятся «🎁 Клановый сундук» и «📦 Награда аванпоста»
+    if st.get("last_all_poll"):
+        all_line = (f"🎁 Сундуки/аванпосты (раз в {st['all_interval']} с): "
+                    f"{int(time.time() - st['last_all_poll'])} с назад · HTTP {st['last_all_status']}"
+                    f" · нашёл {st['last_all_found']}, новых {st['last_all_added']}")
+        lines.append(all_line)
+    elif st.get("native"):
+        lines.append(f"🎁 Сундуки/аванпосты (раз в {st['all_interval']} с): ещё не опрашивал")
+    if st.get("last_all_error"):
+        lines.append("⚠️ Сундуки/аванпосты, ошибка: " + html.escape(st["last_all_error"]))
     if st["last_error"]:
         lines.append("Сеть: " + html.escape(st["last_error"]))
+    # Мини-апп: где сейчас живёт и поднят ли
+    if not config.WEBAPP_ENABLED:
+        lines.append("🎯 Мини-апп: выключен (WEBAPP_ENABLED=false в .env)")
+    elif webapp_server.current_url():
+        lines.append("🎯 Мини-апп: работает — кнопка меню ☰ или /app")
+    else:
+        lines.append("🎯 Мини-апп: поднимаю туннель… (лог: data/tunnel.log)")
     lines.append("")
     if st.get("native"):
         lines.append("Ключ продлевается автоматически. Если сервер перестанет "
@@ -352,6 +392,39 @@ async def cmd_tz(message: Message):
 async def cmd_menu(message: Message):
     db.upsert_user(message.from_user.id, config.DEFAULT_TZ)
     await message.answer(MENU_TEXT, reply_markup=kb_main(message.from_user.id))
+
+
+@router.message(Command("app"))
+async def cmd_app(message: Message):
+    """Мини-апп: все таймеры на одном экране + кнопки управления."""
+    await _send_app(message)
+
+
+async def _send_app(message: Message):
+    db.upsert_user(message.from_user.id, config.DEFAULT_TZ)
+    if not config.WEBAPP_ENABLED:
+        await message.answer(
+            "🎯 Мини-апп выключен (WEBAPP_ENABLED=false в .env). "
+            "Включите и перезапустите <code>start.bat</code>.")
+        return
+    url = webapp_server.current_url()
+    if not url:
+        await message.answer(
+            "🎯 Мини-апп поднимается: бот ищет/скачивает <code>cloudflared</code> "
+            "и открывает туннель (до минуты; лог — <code>data/tunnel.log</code>). "
+            "Напишите /app ещё раз через минуту — появится кнопка, а также она "
+            "появится слева от поля ввода (кнопка меню ☰).")
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🎯 Открыть все таймеры",
+                             web_app=WebAppInfo(url=url))]])
+    await message.answer(
+        "🎯 <b>Мини-апп со всеми таймерами</b>\n"
+        "Кнопка ниже открывает панель: живые отсчёты, тихий режим по группам, "
+        "отмена таймеров, кнопка «Обновить». Уведомления в чат приходят "
+        "как раньше.\n\n"
+        "Тот же экран открывает кнопка меню ☰ слева от поля ввода.",
+        reply_markup=kb)
 
 
 @router.message(Command("ask"))
@@ -450,6 +523,11 @@ async def cmd_trace_cyr(message: Message):
 @router.message(F.text.regexp(r"^/(трейслог|tracelog)(@\w+)?$"))
 async def cmd_tracelog_cyr(message: Message):
     await cmd_tracelog(message)
+
+
+@router.message(F.text.regexp(r"^/(приложение|миниапп)(@\w+)?$"))
+async def cmd_app_cyr(message: Message):
+    await _send_app(message)
 
 
 # ---------- Callbacks ----------

@@ -7,6 +7,9 @@
 .env
 github_repo.txt
 
+# --- Личная инструкция по GitHub (в публичный README не входит) ---
+GITHUB.md
+
 # --- Сессия юзербота = ваш вход в Telegram ---
 userbot.session
 *.session
@@ -35,3 +38,7 @@ desktop.ini
 .DS_Store
 *.log
 python-installer.exe
+
+# --- Туннель cloudflared для мини-аппа (~20 МБ, качается сам) ---
+cloudflared.exe
+cloudflared
