@@ -12,7 +12,7 @@ _ENV_PATH = str(Path(__file__).resolve().parent / ".env")
 load_dotenv(_ENV_PATH)
 
 # --- Версия. ПРАВИЛО: бампается при КАЖДОМ изменении кода/документации ---
-APP_VERSION = "0.0.4-alpha"
+APP_VERSION = "0.0.6-alpha"
 
 # --- Основное ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -73,6 +73,9 @@ WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "8080") or 8080)
 # Свой публичный HTTPS-адрес (свой туннель/VPS). Пусто — бот поднимает
 # cloudflared сам. Пример: https://my-timer.example.com
 WEBAPP_PUBLIC_URL = os.getenv("WEBAPP_PUBLIC_URL", "").strip().rstrip("/")
+# Транспорт туннеля: auto (по очереди http2/TCP и quic/UDP), http2 или quic.
+# Если провайдер режет только один из портов 7844 — зафиксируйте рабочий.
+TUNNEL_PROTOCOL = os.getenv("WEBAPP_TUNNEL_PROTOCOL", "auto").strip().lower()
 
 # --- Юзербот (свежая initData автоматически, логин один раз через login_bot.bat) ---
 # По умолчанию — общедоступная пара Telegram Desktop; можно вписать свою из
@@ -197,7 +200,7 @@ def reload():
     global FOMO_INIT_DATA, FOMO_API_BASE, FOMO_GAME_BOT, FOMO_APP_NAME, FOMO_LANG, FOMO_REAUTH_INTERVAL
     global FOMO_WEB_ORIGIN, USERBOT_API_ID, USERBOT_API_HASH, USERBOT_SESSION_PATH
     global FOMO_ALL_INTERVAL, SIEGE_PREWARN_SEC  # без этого reload писал бы в локальную переменную
-    global WEBAPP_ENABLED, WEBAPP_PORT, WEBAPP_PUBLIC_URL
+    global WEBAPP_ENABLED, WEBAPP_PORT, WEBAPP_PUBLIC_URL, TUNNEL_PROTOCOL
     try:
         load_dotenv(_ENV_PATH, override=True)
     except Exception:
@@ -242,6 +245,7 @@ def reload():
     except ValueError:
         WEBAPP_PORT = 8080
     WEBAPP_PUBLIC_URL = os.getenv("WEBAPP_PUBLIC_URL", "").strip().rstrip("/")
+    TUNNEL_PROTOCOL = os.getenv("WEBAPP_TUNNEL_PROTOCOL", "auto").strip().lower()
     try:
         USERBOT_API_ID = int(os.getenv("USERBOT_API_ID", "6") or 6)
     except ValueError:

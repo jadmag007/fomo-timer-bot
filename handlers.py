@@ -38,6 +38,7 @@ import api_poller
 import config
 import db
 import apitrace as trace_mod
+import tunnel
 import webapp_server
 from util import fmt_clock, fmt_delta, local_str, parse_duration, safe_tz
 
@@ -316,13 +317,32 @@ def api_status_text():
         lines.append("⚠️ Сундуки/аванпосты, ошибка: " + html.escape(st["last_all_error"]))
     if st["last_error"]:
         lines.append("Сеть: " + html.escape(st["last_error"]))
-    # Мини-апп: где сейчас живёт и поднят ли
+    # Мини-апп: где сейчас живёт и подтверждён ли; статус туннеля показывает
+    # падения/переезды не только в логе (см. error 1033 в FAQ)
     if not config.WEBAPP_ENABLED:
         lines.append("🎯 Мини-апп: выключен (WEBAPP_ENABLED=false в .env)")
-    elif webapp_server.current_url():
-        lines.append("🎯 Мини-апп: работает — кнопка меню ☰ или /app")
     else:
-        lines.append("🎯 Мини-апп: поднимаю туннель… (лог: data/tunnel.log)")
+        turl = webapp_server.current_url()
+        tst = tunnel.status()
+        if turl:
+            extra = ""
+            if tst.get("since"):
+                age = int(time.time() - tst["since"])
+                extra += f" · жив {age // 60} мин" if age >= 60 else f" · жив {age} с"
+            if tst.get("restarts"):
+                extra += f" · перезапусков туннеля: {tst['restarts']}"
+            lines.append("🎯 Мини-апп: работает — кнопка меню ☰ или /app" + extra)
+        elif tst.get("blocked"):
+            lines.append("🎯 Мини-апп: сеть блокирует туннель (порты 7844) — "
+                         "помогает VPN на ПК. Перепроверяю сам каждые несколько "
+                         "минут; как заработает — пришлю кнопку (лог: "
+                         "data/tunnel.log)")
+        else:
+            down = ""
+            if tst.get("down_at"):
+                down = f" (последний упал {int(time.time() - tst['down_at'])} с назад)"
+            lines.append("🎯 Мини-апп: поднимаю/перезапускаю туннель…" + down
+                         + " (лог: data/tunnel.log)")
     lines.append("")
     if st.get("native"):
         lines.append("Ключ продлевается автоматически. Если сервер перестанет "
@@ -409,11 +429,22 @@ async def _send_app(message: Message):
         return
     url = webapp_server.current_url()
     if not url:
-        await message.answer(
-            "🎯 Мини-апп поднимается: бот ищет/скачивает <code>cloudflared</code> "
-            "и открывает туннель (до минуты; лог — <code>data/tunnel.log</code>). "
-            "Напишите /app ещё раз через минуту — появится кнопка, а также она "
-            "появится слева от поля ввода (кнопка меню ☰).")
+        if tunnel.status().get("blocked"):
+            await message.answer(
+                "⚠️ <b>Мини-апп не открывается из вашей сети</b>: провайдер/"
+                "файрвол блокирует порты Cloudflare-туннеля (TCP/UDP 7844).\n\n"
+                "Что помогает:\n"
+                "• включить VPN на компьютере, где запущен бот (VPN на телефоне "
+                "не считается — туннель поднимает именно ПК);\n"
+                "• или вписать свой адрес в <code>WEBAPP_PUBLIC_URL</code> в .env.\n\n"
+                "🔄 Бот перепроверяет сам каждые несколько минут — как только "
+                "туннель заработает, пришлю свежую кнопку.")
+        else:
+            await message.answer(
+                "🎯 Мини-апп поднимается: бот ищет/скачивает <code>cloudflared</code> "
+                "и открывает туннель (до минуты; лог — <code>data/tunnel.log</code>). "
+                "Напишите /app ещё раз через минуту — появится кнопка, а также она "
+                "появится слева от поля ввода (кнопка меню ☰).")
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="🎯 Открыть все таймеры",

@@ -4,12 +4,16 @@
 Совместимо с aiogram 3.x.
 """
 import asyncio
+import html
 import logging
+import time
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import BotCommand, MenuButtonWebApp, WebAppInfo
+from aiogram.types import (BotCommand, InlineKeyboardButton,
+                           InlineKeyboardMarkup, MenuButtonDefault,
+                           MenuButtonWebApp, WebAppInfo)
 
 import api_poller
 import config
@@ -35,22 +39,107 @@ BOT_COMMANDS = [
 # Ссылки на фоновые задачи держим живыми (иначе сборщик мусора может их собрать)
 _TASKS: list[asyncio.Task] = []
 
+# Какой адрес мы уже анонсировали владельцу и когда (защита от спама,
+# если туннель в crash-loop меняет адрес каждые несколько секунд)
+ANNOUNCE_COOLDOWN = 120  # секунд между сообщениями с новой кнопкой
+_LAST_ANNOUNCED = {"url": "", "at": 0.0}
+
+# Сообщение о блокировке туннеля (7844) шлём не чаще раза в полчаса:
+# tunnel.on_blocked и так срабатывает раз на серию, это вторая ступень защиты
+BLOCKED_COOLDOWN = 1800
+_LAST_BLOCKED = {"at": 0.0}
+
+
+async def _announce_url(bot: Bot, url: str):
+    """Прислать владельцу сообщение со СВЕЖЕЙ кнопкой мини-аппа.
+
+    Зачем: кнопка меню ☰ у Telegram-клиентов может закэшироваться и вести
+    на старый адрес (Cloudflare в этом случае показывает error 1033).
+    Кнопка в только что присланном сообщении всегда актуальна — это
+    надёжный вход в мини-апп после каждой смены адреса (рестарт бота,
+    переезд туннеля).
+    """
+    if not url:
+        return
+    now = time.monotonic()
+    if url == _LAST_ANNOUNCED["url"]:
+        return
+    if _LAST_ANNOUNCED["url"] and now - _LAST_ANNOUNCED["at"] < ANNOUNCE_COOLDOWN:
+        log.info("Мини-апп: адрес сменился, но анонс подавлен (кулдаун)")
+        return
+    _LAST_ANNOUNCED.update(url=url, at=now)
+    ids = webapp_server.allowed_user_ids()
+    if not ids:
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🎯 Открыть таймеры",
+                             web_app=WebAppInfo(url=url))]])
+    try:
+        await bot.send_message(
+            next(iter(ids)),
+            "🎯 Мини-апп готов — жмите кнопку ниже. Она всегда открывает "
+            "актуальный адрес; кнопка меню ☰ может обновиться с задержкой.",
+            reply_markup=kb)
+        log.info("Мини-апп: владельцу отправлена свежая кнопка")
+    except Exception as e:
+        log.warning("Мини-апп: не вышло отправить кнопку владельцу: %s", e)
+
 
 async def _apply_webapp_url(bot: Bot, url: str):
-    """Туннель поднялся (или адрес из .env) → обновить кнопку меню Telegram.
+    """Туннель поднялся (url) или упал (url="") → обновить кнопку меню.
 
     Адрес меняется при каждом рестарте бота — поэтому кнопку ставим заново
-    при каждом запуске; у пользователя вместо меню команд останется кнопка
-    «🎯 Таймеры», открывающая мини-апп.
+    при каждом запуске. Когда туннель УМЕР, старую кнопку убираем совсем
+    (MenuButtonDefault): иначе она остаётся вести на мёртвый адрес, и
+    пользователь видит Cloudflare error 1033.
     """
-    webapp_server.set_public_url(url)
+    webapp_server.set_public_url(url or "")
     try:
-        await bot.set_chat_menu_button(
-            menu_button=MenuButtonWebApp(text="🎯 Таймеры",
-                                         web_app=WebAppInfo(url=url)))
-        log.info("Мини-апп: кнопка меню указывает на %s", url)
+        if url:
+            await bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(text="🎯 Таймеры",
+                                             web_app=WebAppInfo(url=url)))
+            log.info("Мини-апп: кнопка меню указывает на %s", url)
+        else:
+            await bot.set_chat_menu_button(menu_button=MenuButtonDefault())
+            log.warning("Мини-апп: туннель упал — кнопка меню с мёртвым "
+                        "адресом убрана, пока туннель не поднимется снова")
     except Exception as e:
-        log.warning("Мини-апп: не удалось поставить кнопку меню: %s", e)
+        log.warning("Мини-апп: не удалось обновить кнопку меню: %s", e)
+    await _announce_url(bot, url)
+
+
+async def _announce_blocked(bot: Bot, reason: str):
+    """Туннель не подтвердился (сеть режет 7844) — сообщить владельцу.
+
+    Важно НЕ промолчать: раньше бот писал «туннель поднят», пользователь жал
+    кнопку и получал Cloudflare error 1033 без объяснений. Теперь вместо
+    мёртвой кнопки приходит понятный диагноз и что делать. Кнопку меню при
+    этом не трогаем — просто ждём, пока сеть пропустит туннель (bot
+    перепроверяет сам каждые несколько минут и пришлёт свежую кнопку).
+    """
+    now = time.monotonic()
+    if now - _LAST_BLOCKED["at"] < BLOCKED_COOLDOWN:
+        return
+    _LAST_BLOCKED["at"] = now
+    ids = webapp_server.allowed_user_ids()
+    if not ids:
+        return
+    try:
+        await bot.send_message(
+            next(iter(ids)),
+            "⚠️ <b>Мини-апп не открывается из вашей сети</b>\n\n"
+            + html.escape(str(reason)) + "\n\n"
+            "Что помогает:\n"
+            "• включить VPN на компьютере, где запущен бот (VPN на телефоне "
+            "не считается — туннель поднимает именно ПК);\n"
+            "• или вписать свой адрес в <code>WEBAPP_PUBLIC_URL</code> в "
+            ".env (VPS/свой туннель).\n\n"
+            "🔄 Бот перепроверяет сам каждые несколько минут — как только "
+            "туннель заработает, пришлю свежую кнопку.")
+        log.warning("Мини-апп: владельцу сообщено о блокировке туннеля")
+    except Exception as e:
+        log.warning("Мини-апп: не вышло сообщить о блокировке туннеля: %s", e)
 
 
 def start_webapp(bot: Bot, loop: asyncio.AbstractEventLoop):
@@ -59,7 +148,8 @@ def start_webapp(bot: Bot, loop: asyncio.AbstractEventLoop):
     Сервер слушает только 127.0.0.1 (снаружи не виден), наружу отдаёт только
     cloudflared. Публичный адрес можно задать своим (WEBAPP_PUBLIC_URL в .env),
     иначе поднимаем быстрый туннель cloudflared (при первом запуске сам
-    скачает ~20 МБ, без регистрации).
+    скачает ~20 МБ, без регистрации). Адрес объявляется владельцу только
+    после живой проверки — кнопки с неработающими адресами больше не приходят.
     """
     try:
         srv = webapp_server.start("127.0.0.1", config.WEBAPP_PORT)
@@ -78,8 +168,14 @@ def start_webapp(bot: Bot, loop: asyncio.AbstractEventLoop):
             _apply_webapp_url(bot, config.WEBAPP_PUBLIC_URL), loop)
         return
     import tunnel
-    tunnel.start(port=port, on_url=lambda u: asyncio.run_coroutine_threadsafe(
-        _apply_webapp_url(bot, u), loop))
+    tunnel.start(
+        port=port,
+        on_url=lambda u: asyncio.run_coroutine_threadsafe(
+            _apply_webapp_url(bot, u), loop),
+        on_down=lambda: asyncio.run_coroutine_threadsafe(
+            _apply_webapp_url(bot, ""), loop),
+        on_blocked=lambda reason: asyncio.run_coroutine_threadsafe(
+            _announce_blocked(bot, reason), loop))
 
 
 async def main():
