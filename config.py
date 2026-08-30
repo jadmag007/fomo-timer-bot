@@ -25,7 +25,13 @@ load_dotenv(_ENV_PATH)
 # aiohttp/pydantic, pydantic-core (Rust) не собирается без тулчейна (rustup
 # не умеет android-таргет) -> install.sh ставит rust+binutils из репо Termux
 # (умеет aarch64-linux-android), aiohttp в pure-python (AIOHTTP_NO_EXTENSIONS).
-APP_VERSION = "0.1.0.5"
+# 0.1.0.6 — Termux: pydantic-core ставится ГОТОВЫМ колесом android_24_arm64_v8a
+# из зеркала TUR PyPI (--only-binary :all:) — без Rust и 10-25-минутной сборки,
+# которые у 0.1.0.5 упали на телефоне (rustup не умеет android-таргет).
+# Запасной путь: rust+binutils из репо Termux + maturin оттуда же +
+# --no-build-isolation. В TERMUX.md — пошаговый перенос .env+data через свой
+# git-репозиторий (сделать репо приватным, PAT, git add -f, git pull).
+APP_VERSION = "0.1.0.6"
 
 # --- Основное ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()

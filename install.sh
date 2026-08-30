@@ -50,17 +50,26 @@ echo "Python: $($PY --version)"
 
 # ---------- 2. Окружение и зависимости ----------
 if $IS_TERMUX; then
-    # pydantic-core (зависимость aiogram) — Rust-расширение: на PyPI нет
-    # сборок под андроид, а rustup не поддерживает target android (он и
-    # писал «Rust not found, installing into a temporary directory» и падал).
-    # Собираем рустом САМОГО Termux — он умеет aarch64-linux-android из коробки.
-    # rust сам тянет clang — им же соберётся и всё остальное при случае.
-    echo "Termux: ставлю python, git и тулчейн Rust (нужен для pydantic-core)..."
-    pkg install -y python git rust binutils
+    # pydantic-core (зависимость aiogram) — Rust-расширение: на PyPI нет сборок
+    # под андроид, а сборка на телефоне падает (rustup не умеет android-таргет,
+    # проверено в 0.1.0.5). Готовое колесо берём из зеркала TUR PyPI —
+    # официального PyPI-зеркала Termux User Repository (колёса с тегом
+    # android_24_arm64_v8a). Секунды, без компиляции.
+    echo "Termux: ставлю python и git..."
+    pkg install -y python git
     # aiohttp переводим в pure-python — без лишней компиляции C-части
     export AIOHTTP_NO_EXTENSIONS=1
-    echo "Ставлю зависимости (на телефоне это 10-25 минут — разовая сборка pydantic-core на Rust)..."
     pip install --upgrade pip || true
+    echo "Ставлю pydantic-core готовым колесом из зеркала TUR PyPI (без компиляции)..."
+    if pip install --only-binary :all: --extra-index-url https://termux-user-repository.github.io/pypi/ pydantic-core; then
+        echo "pydantic-core: готовое колесо установлено."
+    else
+        echo "Зеркало недоступно — запасной путь: сборка на месте (10-25 минут, разовая)..."
+        pkg install -y rust binutils
+        pip install --only-binary :all: --extra-index-url https://termux-user-repository.github.io/pypi/ maturin || pip install maturin || true
+        pip install --no-build-isolation pydantic-core
+    fi
+    echo "Ставлю остальные зависимости..."
     if ! pip install -r requirements.txt; then
         echo "Не собралось — доставляю компилятор и пробую ещё раз..."
         pkg install -y build-essential
