@@ -138,6 +138,15 @@ async def _login_once(spath: str, api_id: int, api_hash: str) -> bool:
         uname = f"@{me.username}" if me.username else "без username"
         print(f"Вход выполнен: {me.first_name} ({uname}) — сессия: {spath}.session")
 
+        # Юзербот — это и есть ваш аккаунт: его Telegram ID = владелец
+        # таймеров и пушей. Бот сразу знает, кому ставить автотаймеры,
+        # даже если /start вы никогда не нажимали (строка в базе создаётся тут).
+        import db
+        db.upsert_user(int(me.id))
+        if not config.API_OWNER_TG_ID and config.set_api_owner_tg_id(int(me.id)):
+            print(f"Владелец автотрекинга — вы (API_OWNER_TG_ID={me.id}): "
+                  "/start и заполнение .env руками не нужны.")
+
         print("Проверяю доступ к мини-аппу игры…")
         try:
             from telethon.tl.functions.messages import RequestAppWebViewRequest

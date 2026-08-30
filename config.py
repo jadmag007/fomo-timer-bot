@@ -61,7 +61,17 @@ load_dotenv(_ENV_PATH)
 # (bot_id в новых, только short_name в старых — userbot.build_short_name_app),
 # а падение проверки мини-аппа больше НЕ удаляет валидную сессию: бот сам
 # добудет ключ этой сессией (api_poller самовключение + refresh_init_data).
-APP_VERSION = "0.1.1.0"
+# 0.1.1.1 — вход юзербота ставит владельца автотрекинга САМ: юзербот — это
+# ваш собственный аккаунт, поэтому его Telegram ID сохраняется в .env
+# (API_OWNER_TG_ID) и строка пользователя создаётся в базе: пушам и
+# автотаймерам не нужен ни /start, ни ручное заполнение .env. Предупреждение
+# «некому ставить таймер» больше не спамит каждый цикл (раз в 10 минут).
+# API_OWNER_TG_ID стал приоритетом, а не тупиком: если строки в базе нет,
+# владелец берётся как раньше — первый /start. start.sh (Termux/Linux) при
+# запуске сам тихо подтягивает обновления из GitHub (fetch + stash правок +
+# pull --ff-only, личные файлы .env/data/ не трогаются) и печатает версию,
+# как start.bat на Windows.
+APP_VERSION = "0.1.1.1"
 
 # --- Основное ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -242,6 +252,23 @@ def set_api_enabled(value: bool, env_path=".env") -> bool:
     global API_ENABLED
     API_ENABLED = bool(value)
     return _update_env_keys({"API_ENABLED": "true" if API_ENABLED else "false"}, env_path)
+
+
+def set_api_owner_tg_id(value, env_path=".env") -> bool:
+    """Сохранить владельца автотрекинга в .env (API_OWNER_TG_ID).
+
+    login_userbot.py вызывает это сам: юзербот = ваш собственный аккаунт,
+    так что его Telegram ID и есть владелец таймеров и пушей. /start не
+    обязателен, руками .env заполнять не нужно.
+    """
+    global API_OWNER_TG_ID
+    try:
+        API_OWNER_TG_ID = int(str(value).strip())
+    except (ValueError, TypeError):
+        return False
+    if API_OWNER_TG_ID <= 0:
+        return False
+    return _update_env_keys({"API_OWNER_TG_ID": str(API_OWNER_TG_ID)}, env_path)
 
 
 def reload():

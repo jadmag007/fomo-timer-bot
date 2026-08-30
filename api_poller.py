@@ -134,9 +134,15 @@ def extra_headers():
 
 
 def owner():
-    """Кому ставить автотаймеры: из .env (API_OWNER_TG_ID) или первый /start."""
+    """Кому ставить автотаймеры: из .env (API_OWNER_TG_ID) или первый /start.
+
+    ID из .env — приоритет, а не тупик: если пользователя с таким ID в базе
+    нет (свежая установка, база пустая), берём как раньше — первого /start.
+    """
     if config.API_OWNER_TG_ID:
-        return db.get_user(config.API_OWNER_TG_ID)
+        u = db.get_user(config.API_OWNER_TG_ID)
+        if u:
+            return u
     return db.first_user()
 
 
@@ -547,8 +553,13 @@ def extract_from_har(path, now=None):
     return out
 
 
+_OWNER_WARN_TS = 0.0  # последнее предупреждение «некому ставить таймер» (анти-спам)
+_OWNER_WARN_EVERY = 600.0  # секунды между повторами предупреждения
+
+
 def maybe_add(up):
     """Поставить авто-таймер с защитой от дублей. -> 1, если добавлен."""
+    global _OWNER_WARN_TS
     label, ends_at = up["label"], float(up["ends_at"])
     rk = up.get("ready_key")
     if rk:
@@ -561,8 +572,14 @@ def maybe_add(up):
         return 0
     user = owner()
     if not user:
-        log.warning("API: некому ставить таймер — откройте боту /start или "
-                    "заполните API_OWNER_TG_ID в .env")
+        # Десяток наград = десяток одинаковых предупреждений за цикл —
+        # предупреждаем не чаще раза в 10 минут, таймеры ждут владельца.
+        import time as _t
+        now = _t.monotonic()
+        if now - _OWNER_WARN_TS >= _OWNER_WARN_EVERY:
+            _OWNER_WARN_TS = now
+            log.warning("API: некому ставить таймер — откройте боту /start или "
+                        "заполните API_OWNER_TG_ID в .env")
         return 0
     # Уже стоит почти такой же активный таймер (поле remaining «плывёт» на пару секунд)?
     for t in db.active(user["tg_id"]):

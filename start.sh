@@ -25,6 +25,27 @@ else
     PYBIN=./.venv/bin/python
 fi
 
+# ---------- Автообновление из GitHub (тихо; без git или репо — пропускаем) ----------
+if command -v git >/dev/null 2>&1 && [ -d .git ]; then
+    if git fetch origin main >/dev/null 2>&1; then
+        LOCALREV=$(git rev-parse HEAD 2>/dev/null)
+        REMOTEREV=$(git rev-parse origin/main 2>/dev/null)
+        if [ -n "$LOCALREV" ] && [ -n "$REMOTEREV" ] && [ "$LOCALREV" != "$REMOTEREV" ]; then
+            echo "GitHub: есть обновление — ставлю. Правки служебных файлов уйдут в"
+            echo "stash (возврат: git stash pop); личные .env и data/ не трогаются."
+            git stash >/dev/null 2>&1
+            if git pull --ff-only >/dev/null 2>&1; then
+                echo "GitHub: обновление установлено."
+            else
+                echo "GitHub: обновить не удалось — запускаю локальную версию как есть."
+            fi
+        fi
+    fi
+fi
+
+# Версия в лог — чтобы на скриншотах было видно, что реально запущено
+"$PYBIN" -c "import config; print('Fomo Timer Bot', config.APP_VERSION)" 2>/dev/null
+
 while true; do
     "$PYBIN" bot.py
     code=$?
