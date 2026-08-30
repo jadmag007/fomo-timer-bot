@@ -26,9 +26,9 @@
 ```bash
 pkg update -y && pkg upgrade -y
 pkg install -y git
-git clone <адрес-твоего-репозитория> fomo-timer-bot
+git clone https://github.com/jadmag007/fomo-timer-bot
 cd fomo-timer-bot
-./install.sh
+bash install.sh
 ```
 
 `install.sh` сам увидит Termux и сделает всё сам: поставит Python,
@@ -41,12 +41,18 @@ cd fomo-timer-bot
 pkg install -y unzip
 unzip fomo-timer-bot.zip
 cd fomo-timer-bot
-./install.sh
+bash install.sh
 ```
 
-Запуск бота: `./start.sh`. Он сам берёт wake-lock и сам перезапускает бота
+Запуск бота: `bash start.sh`. Он сам берёт wake-lock и сам перезапускает бота
 при падении. Остановка: Ctrl+C (кнопка Ctrl в дополнительной строке
 клавиатуры Termux, или зажми «Громкость вниз» и нажми C).
+
+> **Почему `bash install.sh`, а не `./install.sh`?** Git при пуше с Windows
+> не сохраняет бит «исполняемый файл» — после `git clone` на андроиде
+> `./install.sh` отвечал бы «Permission denied». Запуск через `bash` работает
+> всегда. Права можно вернуть и руками: `chmod +x *.sh` (install.sh делает
+> это сам при каждом запуске).
 
 ---
 
@@ -93,7 +99,7 @@ cat > ~/.termux/boot/fomo.sh << 'EOF'
 #!/data/data/com.termux/files/usr/bin/bash
 termux-wake-lock
 cd ~/fomo-timer-bot
-./start.sh
+bash start.sh
 EOF
 chmod +x ~/.termux/boot/fomo.sh
 ```
@@ -126,7 +132,7 @@ chmod +x ~/.termux/boot/fomo.sh
 ```bash
 cd ~/fomo-timer-bot
 git pull
-./start.sh
+bash start.sh
 ```
 
 `.env` и `data/` git не трогает. Если ставил из zip — распакуй новый zip
@@ -146,9 +152,10 @@ Wake-lock держит процессор активным, поэтому ра�
 
 | Симптом | Причина и лечение |
 |---------|-------------------|
+| `./install.sh`: Permission denied | Git с Windows не хранит exec-бит: запускай `bash install.sh` и `bash start.sh` — работает всегда (или один раз `chmod +x *.sh`) |
 | Бот «засыпает» через пару часов | Оптимизация батареи: см. раздел выше (пункт 2) |
 | `409 Conflict` в логе | Где-то запущен второй экземпляр с тем же токеном — останови на ПК или на телефоне |
-| `pip` ругается при установке | `install.sh` сам поставит компилятор и повторит; если нет — `pkg install -y build-essential` и снова `./install.sh` |
+| `pip` ругается при установке | `install.sh` сам поставит компилятор и повторит; если нет — `pkg install -y build-essential` и снова `bash install.sh` |
 | Частые сетевые обрывы в логе | Мобильный интернет; бот перезапрашивает сам, это не ошибка |
 | `Exec format error` от cloudflared | Старая версия бота (до 0.1.0.3) качала amd64-сборку — обновись |
 | Termux просит хранилище | Не нужно: боту хватает своей папки в домашнем каталоге Termux |

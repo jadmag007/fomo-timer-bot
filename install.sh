@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # Fomo Timer Bot — установка (Linux / macOS / Android-Termux)
-# Запуск: откройте терминал в папке проекта и выполните  ./install.sh
+# Запуск: откройте терминал в папке проекта и выполните  bash install.sh
+# (или ./install.sh, если файлу даны права на запуск)
 # Подробный гайд по андроиду: TERMUX.md
 set -e
 cd "$(dirname "$0")"
+
+# Git при пуше с Windows не сохраняет exec-бит: после git clone на
+# linux/андроиде «./install.sh» даёт Permission denied. Чиним права всем
+# скриптам при каждом запуске (себе это не нужно — мы уже запущены через bash).
+chmod +x ./*.sh 2>/dev/null || true
 
 # ---------- 0. Termux? ----------
 IS_TERMUX=false
@@ -92,9 +98,9 @@ echo
 
 # ---------- 4. Запуск ----------
 echo "Готово! Запускаю бота (остановка: Ctrl+C)."
-echo "Потом можно запускать командой: ./start.sh"
+echo "Потом можно запускать командой: bash start.sh"
 if $IS_TERMUX; then
     echo "На андроиде держите Termux открытым (или настройте автозапуск — см. TERMUX.md)."
 fi
 sleep 2
-exec ./start.sh
+exec bash start.sh

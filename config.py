@@ -17,7 +17,11 @@ load_dotenv(_ENV_PATH)
 # 0.1.0.3 — Termux/Android: install.sh и start.sh понимают Termux (wake-lock,
 # готовый aiohttp, без venv), tunnel.py качает arm64-сборку cloudflared,
 # гайд TERMUX.md.
-APP_VERSION = "0.1.0.3"
+# 0.1.0.4 — фикс запуска после git clone на андроиде: git с Windows не хранит
+# exec-бит -> «./install.sh: Permission denied». Везде bash install.sh /
+# bash start.sh, install.sh сам чинит права .sh, в TERMUX.md вшит адрес
+# репозитория.
+APP_VERSION = "0.1.0.4"
 
 # --- Основное ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
