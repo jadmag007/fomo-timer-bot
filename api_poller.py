@@ -840,18 +840,85 @@ def status():
     }
 
 
+# --- Самовключение автотрекинга (юзербот залогинен -> fomo.txt не нужен) ---
+_SELF_NEXT = 0.0     # когда можно снова заглянуть в .env на диске (сек)
+_SELF_TRIED = False  # добычу ключа юзерботом пробуем ОДИН раз за запуск
+
+
+async def _selfenable_tick(bot=None) -> None:
+    """Пока автотрекинг выключен (API_ENABLED=false), раз в 15 секунд читаем
+    .env ПРЯМО С ДИСКА: там мог появиться ключ (login_userbot.py сохраняет
+    initData и ставит API_ENABLED=true). Появился — включаемся сами, без
+    рестарта бота и без fomo.txt. Если ключа нет, но есть сессия юзербота —
+    один раз добываем ключ сами (как login_userbot.py, только молча)."""
+    global _SELF_NEXT, _SELF_TRIED, _FOMO
+    import os
+    now = time.time()
+    if now < _SELF_NEXT:
+        return
+    _SELF_NEXT = now + 15
+    disk_enabled = config.env_get("API_ENABLED", "false").strip().lower() == "true"
+    disk_init = config.env_get("FOMO_INIT_DATA", "").strip()
+    if disk_init:
+        # Ключ появился в .env (login_bot.bat / руками): включаемся и
+        # перечитываем весь конфиг, клиент пересоздастся с новым ключом.
+        if not disk_enabled:
+            config.set_api_enabled(True)
+        config.reload()
+        _FOMO = None
+        log.info("Автотрекинг включён сам: в .env появился initData-ключ — "
+                 "fomo.txt не нужен.")
+        await notify_owner(bot, "🤖 <b>Автотрекинг включён сам</b>: ключ игры "
+                                "появился в .env — fomo.txt не нужен, таймеры "
+                                "пойдут без ваших действий.")
+        return
+    if disk_enabled:
+        config.reload()  # флаг уже true на диске — подтягиваем остальные поля
+        return
+    if _SELF_TRIED:
+        return
+    _SELF_TRIED = True
+    spath = config.USERBOT_SESSION_PATH
+    sess = spath if spath.endswith(".session") else spath + ".session"
+    if not os.path.exists(sess):
+        return
+    log.info("Юзербот-сессия найдена, а initData ещё нет — пробую добыть ключ "
+             "сам (один раз; ваши действия не нужны)…")
+    try:
+        import userbot
+        fresh = await userbot.refresh_init_data()
+    except Exception as e:
+        log.warning("Юзербот: самостоятельная добыча ключа не удалась: %s",
+                    str(e)[:150])
+        fresh = ""
+    if fresh:
+        config.set_fomo_init_data(fresh)
+        config.set_api_enabled(True)
+        config.reload()
+        _FOMO = None
+        log.info("Юзербот добыл ключ сам — автотрекинг включён.")
+        await notify_owner(bot, "🤖 <b>Всё настроилось само</b>: юзербот добыл "
+                                "свежий ключ, автотрекинг включён — fomo.txt "
+                                "не нужен.")
+    else:
+        log.warning("Юзербот-сессия не дала ключ (сессия могла устареть) — "
+                    "запустите login_bot.bat ещё раз, либо положите fomo.txt.")
+
+
 async def poll_forever(_bot=None):
     """Вечный цикл. Пока настройки нет — тихо ждёт (файл в token_updates/ или
     в корне папки включит всё сам)."""
     bot = _bot
     if not config.API_ENABLED:
-        log.info("Автотрекинг выключен — модуль ждёт fomo.txt (корень папки "
-                 "или %s/), тогда включится сам.", config.TOKEN_UPDATES_DIR)
+        log.info("Автотрекинг выключен — жду ключ (fomo.txt в корне или %s/, "
+                 "либо вход юзербота login_bot.bat): включусь сам, без "
+                 "рестарта.", config.TOKEN_UPDATES_DIR)
     else:
         log.info("Автотрекинг запущен (интервал %ss)", max(20, config.API_POLL_INTERVAL))
     while True:
         try:
             if not config.API_ENABLED:
+                await _selfenable_tick(bot)
                 await asyncio.sleep(5)
                 continue
             if not (native_mode() or (state_urls() and config.API_AUTH_HEADER)):

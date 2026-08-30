@@ -34,7 +34,6 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
-    WebAppInfo,
 )
 
 import api_poller
@@ -42,7 +41,6 @@ import config
 import db
 import apitrace as trace_mod
 import pause_state
-import tunnel
 import webapp_server
 from util import fmt_clock, fmt_delta, local_str, parse_duration, safe_tz
 
@@ -74,7 +72,7 @@ MENU_TEXT = (
     "<code>/т 22:24</code>) — и в момент финиша придёт «Готово ✅».\n"
     "Формат как в игре: <code>22:24</code> = 22 мин 24 с, "
     "<code>1:28:10</code> = 1 ч 28 м 10 с.\n"
-    "🎯 Все таймеры на одном экране: кнопка меню ☰ или <code>/app</code>.\n\n"
+    "🎯 Все таймеры на одном экране — в браузере: команда <code>/app</code>.\n\n"
     f"🧪 <i>Fomo Timer Bot v{config.APP_VERSION}</i>"
 )
 
@@ -167,19 +165,6 @@ def clamp_seconds(sec):
     return max(config.MIN_TIMER_SEC, min(int(sec), config.MAX_TIMER_SEC))
 
 
-def miniapp_button():
-    """Кнопка «🎯 Мини-апп» (web_app), если публичный адрес уже известен.
-
-    Адрес туннеля появляется не мгновенно (cloudflared поднимается) — тогда
-    кнопки просто нет, а /app объяснит, что происходит.
-    """
-    url = webapp_server.current_url()
-    if not url:
-        return None
-    return InlineKeyboardButton(text="🎯 Мини-апп: все таймеры",
-                                web_app=WebAppInfo(url=url))
-
-
 def kb_main(tg_id):
     """Главное меню = просто чипы длительностей."""
     rows = []
@@ -192,9 +177,6 @@ def kb_main(tg_id):
         InlineKeyboardButton(text="✍️ Своё время", callback_data="cust"),
         InlineKeyboardButton(text="📋 Таймеры", callback_data="list"),
     ])
-    app_btn = miniapp_button()
-    if app_btn:
-        rows.append([app_btn])
     rows.append([
         InlineKeyboardButton(text=f"🌍 {user_tz(tg_id).key}",
                              callback_data="tz"),
@@ -320,9 +302,10 @@ def help_text():
         "<code>/трассировка</code> — лог сырых ответов API вкл/выкл\n"
         "<code>/трейслог</code> — прислать файл trace.log · "
         "<code>/help</code> — справка\n\n"
-        "<b>🎯 Мини-апп</b>: кнопка меню (☰) слева от поля ввода или <code>/app</code> — "
-        "все таймеры сразу, живые отсчёты, тихий режим по группам, отмена. "
-        "Уведомления в чат приходят как раньше.\n\n"
+        "<b>🌐 Страница таймеров</b>: открой в браузере на устройстве с ботом "
+        "<code>http://127.0.0.1:8080</code> (или отправь боту <code>/app</code> — он "
+        "подскажет адрес) — все таймеры сразу, живые отсчёты, тихий режим по "
+        "группам, отмена. Уведомления в чат приходят как раньше.\n\n"
         "<b>Автотрекинг:</b> положите <code>fomo.txt</code> в папку бота или в "
         "<code>token_updates</code> — таймеры будут ставиться сами, без "
         "вопросов. Не отображаются клановые сундуки/награды аванпостов? "
@@ -393,32 +376,13 @@ def _api_status_body(st):
         lines.append("⚠️ Сундуки/аванпосты, ошибка: " + html.escape(st["last_all_error"]))
     if st["last_error"]:
         lines.append("Сеть: " + html.escape(st["last_error"]))
-    # Мини-апп: где сейчас живёт и подтверждён ли; статус туннеля показывает
-    # падения/переезды не только в логе (см. error 1033 в FAQ)
+    # Страница таймеров: адрес подскажем прямо в /апи (открывается в браузере
+    # на устройстве с ботом; порт может отличаться, если 8080 был занят)
     if not config.WEBAPP_ENABLED:
-        lines.append("🎯 Мини-апп: выключен (WEBAPP_ENABLED=false в .env)")
+        lines.append("🌐 Страница таймеров: выключена (WEBAPP_ENABLED=false в .env)")
     else:
-        turl = webapp_server.current_url()
-        tst = tunnel.status()
-        if turl:
-            extra = ""
-            if tst.get("since"):
-                age = int(time.time() - tst["since"])
-                extra += f" · жив {age // 60} мин" if age >= 60 else f" · жив {age} с"
-            if tst.get("restarts"):
-                extra += f" · перезапусков туннеля: {tst['restarts']}"
-            lines.append("🎯 Мини-апп: работает — кнопка меню ☰ или /app" + extra)
-        elif tst.get("blocked"):
-            lines.append("🎯 Мини-апп: сеть блокирует туннель (порты 7844) — "
-                         "помогает VPN на ПК. Перепроверяю сам каждые несколько "
-                         "минут; как заработает — пришлю кнопку (лог: "
-                         "data/tunnel.log)")
-        else:
-            down = ""
-            if tst.get("down_at"):
-                down = f" (последний упал {int(time.time() - tst['down_at'])} с назад)"
-            lines.append("🎯 Мини-апп: поднимаю/перезапускаю туннель…" + down
-                         + " (лог: data/tunnel.log)")
+        lines.append("🌐 Страница таймеров: " + webapp_server.local_url()
+                     + " — открыть в браузере этого устройства (или /app)")
     lines.append("")
     if st.get("native"):
         lines.append("Ключ продлевается автоматически. Если сервер перестанет "
@@ -492,7 +456,7 @@ async def cmd_menu(message: Message):
 
 @router.message(Command("app"))
 async def cmd_app(message: Message):
-    """Мини-апп: все таймеры на одном экране + кнопки управления."""
+    """Страница таймеров: адрес в браузере + как открыть на телефоне."""
     await _send_app(message)
 
 
@@ -500,38 +464,18 @@ async def _send_app(message: Message):
     db.upsert_user(message.from_user.id, config.DEFAULT_TZ)
     if not config.WEBAPP_ENABLED:
         await message.answer(
-            "🎯 Мини-апп выключен (WEBAPP_ENABLED=false в .env). "
+            "🌐 Страница таймеров выключена (WEBAPP_ENABLED=false в .env). "
             "Включите и перезапустите <code>start.bat</code>.")
         return
-    url = webapp_server.current_url()
-    if not url:
-        if tunnel.status().get("blocked"):
-            await message.answer(
-                "⚠️ <b>Мини-апп не открывается из вашей сети</b>: провайдер/"
-                "файрвол блокирует порты Cloudflare-туннеля (TCP/UDP 7844).\n\n"
-                "Что помогает:\n"
-                "• включить VPN на компьютере, где запущен бот (VPN на телефоне "
-                "не считается — туннель поднимает именно ПК);\n"
-                "• или вписать свой адрес в <code>WEBAPP_PUBLIC_URL</code> в .env.\n\n"
-                "🔄 Бот перепроверяет сам каждые несколько минут — как только "
-                "туннель заработает, пришлю свежую кнопку.")
-        else:
-            await message.answer(
-                "🎯 Мини-апп поднимается: бот ищет/скачивает <code>cloudflared</code> "
-                "и открывает туннель (до минуты; лог — <code>data/tunnel.log</code>). "
-                "Напишите /app ещё раз через минуту — появится кнопка, а также она "
-                "появится слева от поля ввода (кнопка меню ☰).")
-        return
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🎯 Открыть все таймеры",
-                             web_app=WebAppInfo(url=url))]])
+    url = webapp_server.local_url()
     await message.answer(
-        "🎯 <b>Мини-апп со всеми таймерами</b>\n"
-        "Кнопка ниже открывает панель: живые отсчёты, тихий режим по группам, "
-        "отмена таймеров, кнопка «Обновить». Уведомления в чат приходят "
-        "как раньше.\n\n"
-        "Тот же экран открывает кнопка меню ☰ слева от поля ввода.",
-        reply_markup=kb)
+        "🌐 <b>Страница таймеров — в обычном браузере</b>\n"
+        f"Адрес: <code>{url}</code> — открой его на том устройстве, где запущен "
+        "бот (на ПК — браузер ПК; на телефоне в Termux — браузер телефона).\n\n"
+        "На экране: все таймеры сразу с живыми отсчётами, тихий режим по "
+        "группам, отмена таймеров, кнопка «Обновить». В Chrome на телефоне "
+        "можно «Добавить на главный экран» — будет иконка как у приложения.\n\n"
+        "Уведомления в чат приходят как раньше и от страницы не зависят.")
 
 
 @router.message(Command("ask"))
@@ -632,7 +576,7 @@ async def cmd_tracelog_cyr(message: Message):
     await cmd_tracelog(message)
 
 
-@router.message(F.text.regexp(r"^/(приложение|миниапп)(@\w+)?$"))
+@router.message(F.text.regexp(r"^/(приложение|страница)(@\w+)?$"))
 async def cmd_app_cyr(message: Message):
     await _send_app(message)
 

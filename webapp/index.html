@@ -4,16 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>FOMO Таймеры</title>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
   :root{
-    --bg: var(--tg-theme-bg-color, #17212b);
-    --sec: var(--tg-theme-secondary-bg-color, #232e3c);
-    --text: var(--tg-theme-text-color, #ffffff);
-    --hint: var(--tg-theme-hint-color, #8a97a5);
-    --link: var(--tg-theme-link-color, #6ab3f3);
-    --btn: var(--tg-theme-button-color, #5288c1);
-    --btntext: var(--tg-theme-button-text-color, #ffffff);
+    --bg: #17212b;
+    --sec: #232e3c;
+    --text: #ffffff;
+    --hint: #8a97a5;
+    --link: #6ab3f3;
+    --btn: #5288c1;
+    --btntext: #ffffff;
     --danger: #e0665b;
     --ok: #58c798;
     --warn: #e8b04b;
@@ -119,14 +118,6 @@
     transition: opacity .25s, transform .25s; max-width:86vw; text-align:center;
   }
   #toast.show{opacity:1; transform:translateX(-50%) translateY(0)}
-  #lock{
-    display:none; position:fixed; inset:0; z-index:50; background:var(--bg);
-    align-items:center; justify-content:center; text-align:center; padding:30px;
-  }
-  #lock .big{font-size:52px} #lock b{display:block; margin:12px 0 6px; font-size:17px}
-  #lock p{color:var(--hint); font-size:14px; max-width:320px; margin:0 auto}
-  #lock button{margin-top:18px; border:none; border-radius:12px; padding:11px 26px;
-    background:var(--btn); color:var(--btntext); font-size:15px; font-weight:600}
   #offline{
     display:none; margin:0 12px 10px; padding:8px 12px; border-radius:10px;
     background:rgba(224,102,91,.14); color:var(--danger); font-size:13px;
@@ -150,18 +141,6 @@
 <div id="offline">Нет связи с ботом — показываю последние данные.</div>
 <main id="main"></main>
 
-<div id="lock">
-  <div>
-    <div class="big">🔒</div>
-    <b>Открой мини-апп через Telegram</b>
-    <p>Эта страница работает внутри Telegram: нажми кнопку меню (☰)
-    слева от поля ввода у бота или отправь ему команду <code>/app</code>.
-    На компьютере с ботом она же открывается просто в браузере —
-    <b id="lockLocal">http://127.0.0.1:8080</b> (локальный режим).</p>
-    <button id="btnRetry">Повторить</button>
-  </div>
-</div>
-
 <div id="bar">
   <button id="btnGame">🎮 Игра</button>
   <button id="btnRefresh" class="primary">🔄 Обновить</button>
@@ -172,15 +151,9 @@
 <script>
 (function(){
   "use strict";
-  var tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
-  var AUTH = "";
-  try {
-    if (tg) {
-      tg.ready(); tg.expand();
-      if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred("light");
-    }
-  } catch(e){}
-  AUTH = (tg && tg.initData) ? tg.initData : "";
+  // Локальная страница таймеров: работает в обычном браузере на устройстве
+  // с ботом (http://127.0.0.1:8080). Без Telegram WebApp SDK — вся обвязка
+  // (вход Telegram, туннель, кнопки меню) убрана до лучших времён.
 
   var STATE = null;         // последний ответ /api/state
   var POLL_MS = 30000;      // период фонового обновления
@@ -195,14 +168,6 @@
     t.classList.add("show");
     clearTimeout(t._tm);
     t._tm = setTimeout(function(){ t.classList.remove("show"); }, 2200);
-  }
-
-  function haptic(kind){
-    try {
-      if (!tg || !tg.HapticFeedback) return;
-      if (kind === "ok") tg.HapticFeedback.notificationOccurred("success");
-      else tg.HapticFeedback.impactOccurred("light");
-    } catch(e){}
   }
 
   function pad(n){ return (n < 10 ? "0" : "") + n; }
@@ -232,11 +197,9 @@
 
   function api(path, opts, cb){
     opts = opts || {};
-    var h = opts.headers || {};
-    h["Authorization"] = "tma " + AUTH;
     fetch(path, {
       method: opts.method || "GET",
-      headers: h,
+      headers: opts.headers || {},
       body: opts.body ? JSON.stringify(opts.body) : undefined,
     }).then(function(r){
       return r.json().then(function(j){ cb(r.status, j); },
@@ -250,8 +213,6 @@
     if (busy) return;
     if (!silent) $("status").textContent = "обновляю…";
     api("/api/state", {}, function(code, j){
-      if (code === 401) { showLock(); return; }
-      $("lock").style.display = "none";
       if (code === 0) {
         setOnline("err", "нет связи с ботом");
         $("offline").style.display = "block";
@@ -281,23 +242,18 @@
     $("status").textContent = text;
   }
 
-  function showLock(){ $("lock").style.display = "flex"; $("dot").className = "dot err"; }
-
   // ---------- Отрисовка ----------
 
   function render(){
     if (!STATE) return;
-    var isLocal = !!(STATE.app && STATE.app.local);
-    $("ver").textContent = "v" + STATE.version + (isLocal ? " · 🖥 локально" : "");
+    $("ver").textContent = "v" + STATE.version;
     var st = STATE.api || {};
     var stTxt, stKind = "ok";
     if (STATE.paused) { stTxt = "⏸ бот на паузе — пуши не приходят"; stKind = "warn"; }
     else if (st.token_dead) { stTxt = "ключ игры устарел — автотрекинг стоит"; stKind = "err"; }
-    else if (isLocal) { stTxt = "🖥 локальный режим — страница в браузере этого ПК"; }
-    else if (!STATE.app || !STATE.app.url) { stTxt = "мини-апп ещё поднимается…"; stKind = "warn"; }
     else if (st.last_poll) {
       stTxt = "игра: опрос " + agoStr(st.last_poll) + (st.last_status ? " · HTTP " + st.last_status : "");
-    } else { stTxt = "автотрекинг ещё не опрашивал игру"; stKind = "warn"; }
+    } else { stTxt = "локальная страница — автотрекинг ещё не опрашивал игру"; stKind = "warn"; }
     setOnline(stKind, stTxt);
 
     var main = $("main");
@@ -352,10 +308,7 @@
       chip.style.display = "none";
     }
     el.querySelector(".xbtn").onclick = function(){
-      haptic();
-      if (tg && tg.showConfirm) {
-        tg.showConfirm("Отменить «" + t.label + "»?", function(a){ if (a) cancelTimer(t.id); });
-      } else if (window.confirm) {
+      if (window.confirm) {
         if (window.confirm("Отменить «" + t.label + "»?")) cancelTimer(t.id);
       } else { cancelTimer(t.id); }
     };
@@ -425,34 +378,29 @@
 
   function post(path, body, cb){
     api(path, {method: "POST", body: body}, function(code, j){
-      if (code === 401) { showLock(); return; }
       cb(j || {ok:false, error:"нет ответа"});
     });
   }
 
   function toggleBucket(g){
-    haptic();
     var want = !g.muted;
     post("/api/settings", {bucket: g.key, muted: want}, function(j){
       if (j.ok) {
         g.muted = want;
         toast(want ? "🔕 Пуши группы «" + g.title + "» выключены"
                    : "🔔 Пуши группы «" + g.title + "» включены");
-        haptic("ok");
         render();
       } else toast(j.error || "не получилось");
     });
   }
 
   function toggleAll(){
-    haptic();
     var want = !(STATE && STATE.settings && STATE.settings.all);
     post("/api/settings", {all: want}, function(j){
       if (j.ok) {
         if (STATE) STATE.settings.all = want;
         toast(want ? "🔕 Тихий режим: пуши выключены полностью"
                    : "🔔 Тихий режим выключен — пуши снова приходят");
-        haptic("ok");
         render();
       } else toast(j.error || "не получилось");
     });
@@ -460,7 +408,7 @@
 
   function cancelTimer(id){
     post("/api/cancel", {id: id}, function(j){
-      if (j.ok) { toast("🗑 Таймер отменён"); haptic("ok"); load(true); }
+      if (j.ok) { toast("🗑 Таймер отменён"); load(true); }
       else toast(j.error || "не получилось");
     });
   }
@@ -471,7 +419,6 @@
     var b = $("btnRefresh");
     b.classList.add("busy");
     b.innerHTML = "<span class='spin'>🔄</span> Обновляю…";
-    haptic();
     post("/api/refresh", {}, function(j){
       if (j.ok) toast("Опрашиваю игру — пара секунд…");
       else if (j.error) toast(j.error);
@@ -499,27 +446,13 @@
 
   $("btnRefresh").onclick = refresh;
   $("btnMute").onclick = toggleAll;
-  $("btnRetry").onclick = function(){ load(); };
   $("btnGame").onclick = function(){
-    haptic();
     var url = STATE && STATE.app && STATE.app.game_url;
     if (!url) return;
-    if (tg && tg.openTelegramLink) tg.openTelegramLink(url);
-    else window.open(url, "_blank");   // локальный режим в браузере
+    window.open(url, "_blank");
   };
 
-  // на замке показать актуальный локальный адрес (если мы на этом ПК)
-  if (location.hostname === "127.0.0.1" || location.hostname === "localhost") {
-    $("lockLocal").textContent = location.origin;
-  }
-
-  if (!AUTH) {
-    // страница открыта не из Telegram: initData нет — покажем замок
-    load(true);
-    setTimeout(function(){ if (!STATE) showLock(); }, 700);
-  } else {
-    load();
-  }
+  load();
 })();
 </script>
 </body>

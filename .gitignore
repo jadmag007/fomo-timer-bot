@@ -39,7 +39,8 @@ desktop.ini
 *.log
 python-installer.exe
 
-# --- Туннель cloudflared для мини-аппа (~20 МБ, качается сам) ---
+# --- Остатки cloudflared от старых версий с мини-аппом (убран в 0.1.1.0):
+# если бинарник лежит в папке — чтобы случайно не уехал в git (в zip не входит) ---
 cloudflared.exe
 cloudflared
 

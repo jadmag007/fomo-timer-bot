@@ -46,7 +46,14 @@ load_dotenv(_ENV_PATH)
 # by merge» — телефон молча запускал СТАРЫЙ установщик (без баннера это было
 # не видно), и фиксы 0.1.0.5–0.1.0.7 до него не доезжали. Плюс мягкое
 # сообщение вместо ошибки при запрете pip обновлять самого себя в Termux.
-APP_VERSION = "0.1.0.8"
+# 0.1.1.0 — МИНИ-АПП В TELEGRAM УБРАН ДО ЛУЧШИХ ВРЕМЁН (вернёмся — код
+# останется в истории git): удалены туннель cloudflared (tunnel.py), кнопки
+# WebApp/меню, валидация initData и публичные адреса (WEBAPP_PUBLIC_URL,
+# WEBAPP_TUNNEL_PROTOCOL, WEBAPP_LOCAL_DEBUG). Оставлена и стала основной
+# ЛОКАЛЬНАЯ СТРАНИЦА ТАЙМЕРОВ в обычном браузере: http://127.0.0.1:8080
+# на том устройстве, где запущен бот (ПК или телефон в Termux). Пуши,
+# автотрекинг, пауза и тихий режим не тронуты.
+APP_VERSION = "0.1.1.0"
 
 # --- Основное ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -94,28 +101,16 @@ FOMO_ALL_INTERVAL = int(os.getenv("FOMO_ALL_INTERVAL", "300") or 300)
 # («успейте отправить войска»). По умолчанию — за час.
 SIEGE_PREWARN_SEC = int(os.getenv("SIEGE_PREWARN_SEC", "3600") or 3600)
 
-# --- Мини-приложение в боте (кнопка меню слева от поля ввода) ---
-# Веб-страница со всеми таймерами сразу и кнопками управления (тихий режим
-# по группам, отмена таймера, обновление). Уведомления работают как раньше.
-# Для открытия из Telegram нужен публичный HTTPS-адрес: бот сам поднимает
-# бесплатный туннель cloudflared (при первом запуске скачает ~20 МБ).
-# URL туннеля меняется при каждом рестарте — кнопка меню обновляется сама.
+# --- Страница таймеров в браузере (локальная, без Telegram-обвязки) ---
+# Все таймеры на одном экране: живые отсчёты, тихий режим по группам, отмена,
+# кнопка «Обновить». Открывается в ОБЫЧНОМ браузере на том устройстве, где
+# запущен бот: http://127.0.0.1:PORT (на ПК — браузер ПК, на телефоне в
+# Termux — браузер телефона). Сервер слушает только 127.0.0.1, наружу ничем
+# не торчит; уведомления в чат работают как раньше и от страницы не зависят.
 WEBAPP_ENABLED = os.getenv("WEBAPP_ENABLED", "true").strip().lower() == "true"
 # Локальный порт веб-сервера (слушает только 127.0.0.1). Если занят — берёт
 # следующий свободный.
 WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "8080") or 8080)
-# Свой публичный HTTPS-адрес (свой туннель/VPS). Пусто — бот поднимает
-# cloudflared сам. Пример: https://my-timer.example.com
-WEBAPP_PUBLIC_URL = os.getenv("WEBAPP_PUBLIC_URL", "").strip().rstrip("/")
-# Транспорт туннеля: auto (по очереди http2/TCP и quic/UDP), http2 или quic.
-# Если провайдер режет только один из портов 7844 — зафиксируйте рабочий.
-TUNNEL_PROTOCOL = os.getenv("WEBAPP_TUNNEL_PROTOCOL", "auto").strip().lower()
-# ЛОКАЛЬНЫЙ режим мини-аппа: страница http://127.0.0.1:PORT открывается в
-# обычном браузере НА КОМПЬЮТЕРЕ С БОТОМ без Telegram-подписи (доступ как у
-# владельца). Спасение, когда сеть режет туннель (Cloudflare error 1033).
-# Безопасно: сервер слушает только 127.0.0.1, а у запросов из интернета через
-# туннель всегда есть служебные заголовки Cloudflare — они отсекаются.
-WEBAPP_LOCAL_DEBUG = os.getenv("WEBAPP_LOCAL_DEBUG", "true").strip().lower() == "true"
 
 # --- Юзербот (свежая initData автоматически, логин один раз через login_bot.bat) ---
 # По умолчанию — общедоступная пара Telegram Desktop; можно вписать свою из
@@ -230,6 +225,17 @@ def set_trace(value: bool, env_path=".env") -> bool:
     return _update_env_keys({"API_TRACE": "true" if API_TRACE else "false"}, env_path)
 
 
+def set_api_enabled(value: bool, env_path=".env") -> bool:
+    """Включить/выключить автотрекинг в .env.
+
+    login_userbot.py вызывает это сам после успешного входа юзербота:
+    залогинил Telegram — таймеры пошли сами, fomo.txt не нужен.
+    """
+    global API_ENABLED
+    API_ENABLED = bool(value)
+    return _update_env_keys({"API_ENABLED": "true" if API_ENABLED else "false"}, env_path)
+
+
 def reload():
     """Перечитать .env с диска (watcher обновил файл — подтягиваем без рестарта).
 
@@ -242,8 +248,7 @@ def reload():
     global FOMO_INIT_DATA, FOMO_API_BASE, FOMO_GAME_BOT, FOMO_APP_NAME, FOMO_LANG, FOMO_REAUTH_INTERVAL
     global FOMO_WEB_ORIGIN, USERBOT_API_ID, USERBOT_API_HASH, USERBOT_SESSION_PATH
     global FOMO_ALL_INTERVAL, SIEGE_PREWARN_SEC  # без этого reload писал бы в локальную переменную
-    global WEBAPP_ENABLED, WEBAPP_PORT, WEBAPP_PUBLIC_URL, TUNNEL_PROTOCOL
-    global WEBAPP_LOCAL_DEBUG
+    global WEBAPP_ENABLED, WEBAPP_PORT
     try:
         load_dotenv(_ENV_PATH, override=True)
     except Exception:
@@ -287,9 +292,6 @@ def reload():
         WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "8080") or 8080)
     except ValueError:
         WEBAPP_PORT = 8080
-    WEBAPP_PUBLIC_URL = os.getenv("WEBAPP_PUBLIC_URL", "").strip().rstrip("/")
-    TUNNEL_PROTOCOL = os.getenv("WEBAPP_TUNNEL_PROTOCOL", "auto").strip().lower()
-    WEBAPP_LOCAL_DEBUG = os.getenv("WEBAPP_LOCAL_DEBUG", "true").strip().lower() == "true"
     try:
         USERBOT_API_ID = int(os.getenv("USERBOT_API_ID", "6") or 6)
     except ValueError:

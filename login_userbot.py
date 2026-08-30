@@ -153,6 +153,9 @@ async def _login_once(spath: str, api_id: int, api_hash: str) -> bool:
             import fomo_client
             print("ОК: мини-апп открылся, initData получена "
                   f"({fomo_client.preview_init_data(init)})")
+            if config.set_fomo_init_data(init):
+                print("Ключ сохранён в .env (FOMO_INIT_DATA) — fomo.txt не "
+                      "нужен и не понадобится.")
             print(OK)
             print("Готово! Больше ничего не требуется: бот сам будет")
             print("обновлять initData этой сессией, когда понадобится.")
@@ -198,6 +201,13 @@ async def main() -> int:
                 if config.set_userbot_api(str(api_id), api_hash):
                     print(f"Ваши api-ключи сохранены в .env (USERBOT_API_ID={api_id}) —"
                           " бот будет пользоваться ими сам.")
+            if ok and not config.API_ENABLED:
+                if config.set_api_enabled(True):
+                    print("Автотрекинг включён (API_ENABLED=true в .env): "
+                          "таймеры будут ставиться сами, fomo.txt не нужен.")
+            if ok:
+                print("Если бот сейчас запущен — он заметит это сам за минуту "
+                      "(перезапуск не обязателен).")
             return 0 if ok else 1
         except Exception as e:
             name, text = type(e).__name__, str(e)
