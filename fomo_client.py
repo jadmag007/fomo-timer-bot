@@ -161,6 +161,7 @@ class FomoClient:
         self.lang = lang or "ru"
         self._auth_hash = ""       # Api-Key (hash из initData)
         self._last_auth = 0.0      # unix последнего auth
+        self.last_reauth_ts = 0.0  # unix последней УСПЕШНОЙ реанимации (для пуша-предупреждения)
         self._lock = asyncio.Lock()
 
     # -- низкий уровень --
@@ -209,6 +210,11 @@ class FomoClient:
         if ok:
             self._auth_hash = init_data_hash(self.init_data)
             self._last_auth = time.time()
+            if saved_key:
+                # Это РЕАНИМАЦИЯ, а не первый вход: игра при переавторизации
+                # может выкинуть игрока (сессия одна на всех) — api_poller
+                # предупредит владельца, глядя на last_reauth_ts.
+                self.last_reauth_ts = self._last_auth
             log.info("FOMO auth ok (HTTP %s), ключ …%s активен",
                      status, self._auth_hash[-8:])
             return True
@@ -255,10 +261,11 @@ class FomoClient:
         случае. Возвращает JSON; сетевой сбой — FomoNetworkError,
         мёртвый ключ — FomoAuthError."""
         async with self._lock:
-            # Превентивная реанимация ключа раз в FOMO_REAUTH_INTERVAL секунд
-            # (сервер может инвалидировать ключ при переподключении игры).
-            if not self._auth_hash or (time.time() - self._last_auth
-                                       > max(600, config.FOMO_REAUTH_INTERVAL)):
+            # auth только ПО НЕОБХОДИМОСТИ: когда ключа ещё нет вообще.
+            # Превентивная реанимация по таймеру (раз в FOMO_REAUTH_INTERVAL)
+            # удалена в 0.1.1.2: каждая переавторизация могла выкидывать
+            # игрока из игры, а мёртвый ключ и так обнаружится по 401 ниже.
+            if not self._auth_hash:
                 await self.auth(session)
 
             status, data = await self._post(session, path, body_obj)

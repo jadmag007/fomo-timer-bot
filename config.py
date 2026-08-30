@@ -71,12 +71,33 @@ load_dotenv(_ENV_PATH)
 # запуске сам тихо подтягивает обновления из GitHub (fetch + stash правок +
 # pull --ff-only, личные файлы .env/data/ не трогаются) и печатает версию,
 # как start.bat на Windows.
-APP_VERSION = "0.1.1.1"
+# 0.1.1.2 — ОПРОСЫ БОЛЬШЕ НЕ МЕШАЮТ ИГРАТЬ: опрос игры шёл каждые 45 секунд,
+# и каждая переавторизация бота выбивала сессию игрока — приходилось постоянно
+# перелогиниваться в игре. Теперь опрос при старте и раз в 5 минут
+# (API_POLL_INTERVAL=300, пол 60 с), превентивная реанимация ключа раз в 6 ч
+# УБРАНА: auth только когда ключа нет или сервер ответил 401; при каждой
+# реанимации бот предупреждает в чат («если ты в игре — могла попросить
+# перезайти»), не чаще раза в 30 минут. ОТСРОЧЕННЫЕ ПУШИ ЧЕРЕЗ СЕРВЕРА
+# TELEGRAM: бот планирует «⏰ Готово: …» на момент финиша таймера через
+# юзербота (MTProto schedule) В ЧАТ С БОТОМ — сообщение придёт минута в минуту,
+# даже если бот выключен. Бот доставил свой пуш — запланированный дубль
+# снимается; на паузе всё запланированное снимается, после возобновления
+# распланируется заново. Честно про уведомления: юзербот — ваш же аккаунт,
+# отложка пишется «от вас» и приходит БЕЗ звука (Telegram не уведомляет о
+# своих сообщениях); уведомление приносит сам бот (пуши онлайн / догоняющий).
+# Чужие отложенные сообщения в чате с ботом не трогаются
+# (только с нашим маркером «⏰ Готово: »). Новый модуль sched_push.py,
+# флаг USERBOT_SCHEDULE (по умолчанию вкл, требует userbot.session),
+# имя бота пишется в .env само (BOT_USERNAME).
+APP_VERSION = "0.1.1.2"
 
 # --- Основное ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 DEFAULT_TZ = os.getenv("DEFAULT_TZ", "Europe/Moscow").strip()
 DB_PATH = os.getenv("DB_PATH", "data/fomo_timers.db").strip()
+# @username самого бота — ЗАПОЛНЯЕТСЯ САМО при старте (bot.py -> set_bot_username).
+# Нужно sched_push: отложенные пуши планируются в чат с ботом.
+BOT_USERNAME = os.getenv("BOT_USERNAME", "").strip()
 
 # --- Автотрекинг через API игры (заполняется само, руками — только флаги) ---
 API_ENABLED = os.getenv("API_ENABLED", "false").strip().lower() == "true"
@@ -89,7 +110,11 @@ API_BODY = os.getenv("API_BODY", "").strip()
 # Дополнительные заголовки JSON-словарём (подписи api-* и т.п.), напр.:
 #   {"api-key": "…", "api-hash": "…", "api-time": "…", "api-version": "…"}
 API_HEADERS_JSON = os.getenv("API_HEADERS_JSON", "").strip()
-API_POLL_INTERVAL = int(os.getenv("API_POLL_INTERVAL", "45"))
+# Как часто опрашивать игру, секунд. Раньше было 45 — каждая переавторизация
+# бота выбивала сессию игрока, и приходилось постоянно перелогиниваться в игре.
+# Теперь 300 (5 минут): опрос при старте бота, дальше раз в 5 минут — игре
+# ничего не мешает. Меньше 60 бот всё равно не возьмёт (защита от спама).
+API_POLL_INTERVAL = int(os.getenv("API_POLL_INTERVAL", "300"))
 # Ваш tg_id для автотрекинга (узнать: @userinfobot). Пусто — берётся первый /start боту.
 API_OWNER_TG_ID = int(os.getenv("API_OWNER_TG_ID", "0") or 0)
 # Спрашивать «Да/Нет» перед добавлением найденных таймеров. По умолчанию НЕТ —
@@ -110,7 +135,10 @@ FOMO_GAME_BOT = os.getenv("FOMO_GAME_BOT", "fomo_fighters_bot").strip()
 FOMO_APP_NAME = os.getenv("FOMO_APP_NAME", "game").strip()
 FOMO_LANG = os.getenv("FOMO_LANG", "ru").strip()
 FOMO_WEB_ORIGIN = os.getenv("FOMO_WEB_ORIGIN", "https://game.fomofighters.xyz").strip().rstrip("/")
-# Превентивная реанимация ключа (auth), секунд
+# Превентивная реанимация ключа (auth), секунд — С 0.1.1.2 НЕ ИСПОЛЬЗУЕТСЯ:
+# auth теперь только по необходимости (нет ключа / ответ 401), потому что
+# каждая переавторизация могла выкидывать игрока из игры. Ключ оставлен для
+# совместимости старых .env.
 FOMO_REAUTH_INTERVAL = int(os.getenv("FOMO_REAUTH_INTERVAL", "21600") or 21600)
 # Как часто опрашивать /user/data/all (клановые сундуки, награды аванпостов),
 # секунд. Лёгкий /user/data/timers ходит по API_POLL_INTERVAL.
@@ -136,6 +164,10 @@ WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "8080") or 8080)
 USERBOT_API_ID = int(os.getenv("USERBOT_API_ID", "6") or 6)
 USERBOT_API_HASH = os.getenv("USERBOT_API_HASH", "eb06d4abfb49dc3eeb1aeb98ae0f581e").strip()
 USERBOT_SESSION_PATH = os.getenv("USERBOT_SESSION_PATH", "userbot.session").strip()
+# Отложенные пуши через серверы Telegram (MTProto schedule юзерботом
+# В ЧАТ С БОТОМ): доставятся в срок даже при выключенном боте. Требует
+# userbot.session (login_bot.bat); нет сессии — тихо не используется.
+USERBOT_SCHEDULE = os.getenv("USERBOT_SCHEDULE", "true").strip().lower() == "true"
 
 # --- Поведение напоминаний ---
 # T-1мин выключен выбором «Только T-0»; при желании включите в .env (WARN_ENABLED=true)
@@ -227,6 +259,22 @@ def set_userbot_api(api_id, api_hash, env_path=".env") -> bool:
                              "USERBOT_API_HASH": USERBOT_API_HASH}, env_path)
 
 
+def set_bot_username(username, env_path=".env") -> bool:
+    """Запомнить @username самого бота (bot.py пишет при старте).
+
+    Нужно sched_push: отложенные пуши планируются в чат с ботом. Повторная
+    запись с тем же именем — no-op (не мусорим .env).
+    """
+    global BOT_USERNAME
+    u = (str(username or "").strip().lstrip("@"))
+    if not u:
+        return False
+    if u == BOT_USERNAME:
+        return True
+    BOT_USERNAME = u
+    return _update_env_keys({"BOT_USERNAME": BOT_USERNAME}, env_path)
+
+
 def set_ask_before_add(value: bool, env_path=".env") -> bool:
     """Переключить режим подтверждения: True — список с кнопками Да/Нет,
     False — ставить молча. Пишет в .env (команда /вопросы)."""
@@ -283,7 +331,7 @@ def reload():
     global FOMO_INIT_DATA, FOMO_API_BASE, FOMO_GAME_BOT, FOMO_APP_NAME, FOMO_LANG, FOMO_REAUTH_INTERVAL
     global FOMO_WEB_ORIGIN, USERBOT_API_ID, USERBOT_API_HASH, USERBOT_SESSION_PATH
     global FOMO_ALL_INTERVAL, SIEGE_PREWARN_SEC  # без этого reload писал бы в локальную переменную
-    global WEBAPP_ENABLED, WEBAPP_PORT
+    global WEBAPP_ENABLED, WEBAPP_PORT, USERBOT_SCHEDULE, BOT_USERNAME
     try:
         load_dotenv(_ENV_PATH, override=True)
     except Exception:
@@ -297,9 +345,9 @@ def reload():
     API_BODY = os.getenv("API_BODY", "").strip()
     API_HEADERS_JSON = os.getenv("API_HEADERS_JSON", "").strip()
     try:
-        API_POLL_INTERVAL = int(os.getenv("API_POLL_INTERVAL", "45"))
+        API_POLL_INTERVAL = int(os.getenv("API_POLL_INTERVAL", "300"))
     except ValueError:
-        API_POLL_INTERVAL = 45
+        API_POLL_INTERVAL = 300
     try:
         API_OWNER_TG_ID = int(os.getenv("API_OWNER_TG_ID", "0") or 0)
     except ValueError:
@@ -327,9 +375,11 @@ def reload():
         WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "8080") or 8080)
     except ValueError:
         WEBAPP_PORT = 8080
+    BOT_USERNAME = os.getenv("BOT_USERNAME", "").strip()
     try:
         USERBOT_API_ID = int(os.getenv("USERBOT_API_ID", "6") or 6)
     except ValueError:
         USERBOT_API_ID = 6
     USERBOT_API_HASH = os.getenv("USERBOT_API_HASH", "eb06d4abfb49dc3eeb1aeb98ae0f581e").strip()
     USERBOT_SESSION_PATH = os.getenv("USERBOT_SESSION_PATH", "userbot.session").strip()
+    USERBOT_SCHEDULE = os.getenv("USERBOT_SCHEDULE", "true").strip().lower() == "true"

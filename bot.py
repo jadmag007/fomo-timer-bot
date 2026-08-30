@@ -105,6 +105,10 @@ async def main():
     me = await bot.get_me()
     log.info("Fomo Timer Bot v%s запущен: @%s (id=%s)",
              config.APP_VERSION, me.username, me.id)
+    if me.username and config.BOT_USERNAME != me.username:
+        if config.set_bot_username(me.username):
+            log.info("Имя бота записано в .env (BOT_USERNAME=@%s) — отложенные "
+                     "пуши планируются в чат с ботом", me.username)
     if pause_state.is_paused():
         log.warning("Бот запущен НА ПАУЗЕ (data/pause.json) — пуши не отправляются, "
                     "снять: кнопка «Продолжить» в меню или /пауза")

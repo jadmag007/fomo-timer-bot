@@ -41,6 +41,7 @@ import db
 import fomo_client
 import pause_state
 import apitrace as trace_mod
+import sched_push
 import translations as tr
 from tools import har_inspect
 from util import fmt_clock, local_str, safe_tz
@@ -93,6 +94,7 @@ _STATE = {
     "dead_notified": False,
     "added_total": 0,      # сколько авто-таймеров поставлено за всё время
     "proposed_total": 0,   # сколько таймеров предложено кнопками Да/Нет
+    "reauth_seen": 0.0,    # unix последней РЕАНИМАЦИИ ключа, уже показанной владельцу
 }
 
 
@@ -165,8 +167,8 @@ def fomo_state():
 
 async def _poll_fomo_native(bot=None) -> int:
     """Опрос /user/data/timers в нативном режиме (initData есть).
-    Ключ реанимируется сам: auth при старте, при 401 и раз в FOMO_REAUTH_INTERVAL.
-    Если initData совсем истечёт — свежую добудет юзербот (userbot.py)."""
+    Ключ реанимируется сам: auth при старте и при 401; initData совсем истечёт —
+    свежую добудет юзербот (userbot.py)."""
     global _FOMO
     added = 0
     if not native_mode():
@@ -199,6 +201,7 @@ async def _poll_fomo_native(bot=None) -> int:
             log.warning("FOMO: %s", str(e)[:160])
             return 0
         _STATE.update(last_poll=time.time(), last_status=200, last_error="")
+        await _reauth_note_tick(bot)
         if _STATE["token_dead"]:
             _STATE.update(token_dead=False, dead_notified=False)
             await notify_owner(bot, "🔑 Ключ снова работает ✅ — таймеры продолжают обновляться.")
@@ -591,6 +594,7 @@ def maybe_add(up):
     _SEEN.add(key)
     _STATE["added_total"] += 1
     log.info("API: авто-таймер %r -> %s", label, ends_at)
+    sched_push.kick_schedule(label, ends_at)  # отложенный пуш на серверах Telegram
     if len(_SEEN) > _SEEN_MAX:
         _SEEN.clear()
     return 1
@@ -674,6 +678,8 @@ def confirm_group(gid, now=None):
         added.append({"label": up["label"], "ends_at": ts})
     if added:
         log.info("API: по кнопке «Да» добавлено таймеров: %s", len(added))
+        for it in added:
+            sched_push.kick_schedule(it["label"], it["ends_at"])
     return len(added), added
 
 
@@ -750,6 +756,34 @@ async def notify_owner(bot, text) -> bool:
     except Exception:
         log.exception("Не удалось отправить сообщение владельцу")
         return False
+
+
+_REAUTH_NOTE_TS = 0.0  # анти-спам уведомления о реанимации ключа (раз в 30 минут)
+
+
+async def _reauth_note_tick(bot) -> None:
+    """Ключ реанимирован? Предупредить владельца: игра могла выкинуть его.
+
+    Бот и игра делят одну сессию: когда бот перелогинивается (/telegram/auth),
+    игра может попросить перезайти. Без этого пуша пользователь думал, что
+    бот сломался. Не чаще раза в 30 минут (иначе качель 401 замусорит чат).
+    """
+    global _REAUTH_NOTE_TS
+    fc = _FOMO
+    if not fc or not fc.last_reauth_ts:
+        return
+    if fc.last_reauth_ts <= _STATE.get("reauth_seen", 0.0):
+        return
+    _STATE["reauth_seen"] = fc.last_reauth_ts
+    now = time.time()
+    if now - _REAUTH_NOTE_TS < 1800:
+        return
+    _REAUTH_NOTE_TS = now
+    await notify_owner(
+        bot,
+        "🔄 <b>Бот обновил ключ игры</b> (переавторизация).\n\n"
+        "Если ты сейчас в игре — она могла попросить перезайти: бот и игра "
+        "делят одну сессию, это нормально и не поломка.")
 
 
 # ---------- Опрос ----------
@@ -931,7 +965,7 @@ async def poll_forever(_bot=None):
                  "либо вход юзербота login_bot.bat): включусь сам, без "
                  "рестарта.", config.TOKEN_UPDATES_DIR)
     else:
-        log.info("Автотрекинг запущен (интервал %ss)", max(20, config.API_POLL_INTERVAL))
+        log.info("Автотрекинг запущен (интервал %ss)", max(60, config.API_POLL_INTERVAL))
     while True:
         try:
             if not config.API_ENABLED:
@@ -947,7 +981,9 @@ async def poll_forever(_bot=None):
                 log.exception("Ошибка опроса API (продолжаю по расписанию)")
             # Пока ключ мёртв — опрашиваем редко (раз в 5 мин), чтобы поймать
             # момент, когда пользователь положил свежий fomo.txt.
-            await asyncio.sleep(300 if _STATE["token_dead"] else max(20, config.API_POLL_INTERVAL))
+            # Раз в API_POLL_INTERVAL (по умолчанию 5 минут — чтобы не мешать
+            # игре: каждая переавторизация бота выбивает сессию игрока).
+            await asyncio.sleep(300 if _STATE["token_dead"] else max(60, config.API_POLL_INTERVAL))
         except asyncio.CancelledError:
             raise
         except Exception:

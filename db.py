@@ -108,6 +108,13 @@ def first_user():
             "SELECT * FROM users ORDER BY created_at LIMIT 1").fetchone()
 
 
+def unfinished():
+    """Все недоставленные таймеры (распланировать отложенные пуши после паузы)."""
+    with _LOCK:
+        return _db().execute(
+            "SELECT * FROM timers WHERE done_sent=0").fetchall()
+
+
 def upsert_user(tg_id, tz=None):
     with _LOCK:
         _db().execute(

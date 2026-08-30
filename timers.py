@@ -27,6 +27,7 @@ import time
 import config
 import db
 import pause_state
+import sched_push
 import util
 import webapp_prefs
 
@@ -121,9 +122,11 @@ async def tick(bot, now=None):
         if paused:
             db.mark_done(row["id"])
             pause_state.record_missed(row["label"], row["ends_at"])
+            await sched_push.cancel_for(row["label"])  # запланированный дубль снимаем
             continue
         if webapp_prefs.is_muted(row["bucket"]):
             db.mark_done(row["id"])   # тихий режим: без пуша, но и без догонялок
+            await sched_push.cancel_for(row["label"])
             continue
         user = db.get_user(row["tg_id"])
         tz = util.safe_tz(user["tz"] if user else None)
@@ -132,6 +135,9 @@ async def tick(bot, now=None):
         if await _send(bot, row["chat_id"], done_text(row, tz)):
             db.mark_done(row["id"])
             _retry_done(row["id"])
+            # Свой пуш доставлен — запланированный на серверах дубль больше не нужен.
+            # (Если доставить не удалось, запланированное СОХРАНЯЕМ: оно и есть страховка.)
+            await sched_push.cancel_for(row["label"])
         elif now - row["ends_at"] > DONE_RETRY_SEC:
             # сеть лежит слишком долго — закрываем, чтобы не копить хвост
             db.mark_done(row["id"])
