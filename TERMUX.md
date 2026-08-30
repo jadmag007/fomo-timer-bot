@@ -206,6 +206,7 @@ Wake-lock держит процессор активным, поэтому ра�
 
 | Симптом | Причина и лечение |
 |---------|-------------------|
+| `error: Your local changes ... would be overwritten by merge` (git pull не проходит) | На телефоне остались ручные правки служебных файлов (например, install.sh). Из-за них git НЕ обновлял код — и ты запускал старый установщик. Просто запусти `bash install.sh` — новый установщик сам уведёт правки в stash и обновится. Вручную: `git stash && git pull` (вернуть правки: `git stash pop`) |
 | pip снова пытается собрать `pydantic-core` (Failed to build / Rust not found) | Сначала `git pull` — установка могла запуститься старым установщиком (первая строка install.sh показывает его версию), затем снова `bash install.sh`. Если не помогло — выключи или смени VPN: зеркало TUR (`https://termux-user-repository.github.io/pypi/`) живёт на github.io. Запасная сборка: `pkg install -y rust binutils`, затем снова `bash install.sh` (rustup НЕ подходит — он не умеет андроид-таргет) |
 | Установка падала, а теперь «та же ошибка» на новом установщике | Проверь баннер в первой строке install.sh: если там не самая свежая версия — телефон запускает старый скрипт: `cd ~/fomo-timer-bot && git pull` и снова `bash install.sh` |
 | `./install.sh`: Permission denied | Git с Windows не хранит exec-бит: запускай `bash install.sh` и `bash start.sh` — работает всегда (или один раз `chmod +x *.sh`) |

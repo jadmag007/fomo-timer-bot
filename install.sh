@@ -11,7 +11,29 @@ cd "$(dirname "$0")"
 # скриптам при каждом запуске (себе это не нужно — мы уже запущены через bash).
 chmod +x ./*.sh 2>/dev/null || true
 
-# ---------- 0. Termux? ----------
+# ---------- 0. Самообновление из git (если это клон, а не zip-распаковка) ----------
+# Лечит «error: Your local changes ... would be overwritten by merge»: старые
+# ручные правки служебных файлов уводятся в git stash (вернуть: git stash pop),
+# код тянется свежий, и установщик перезапускает сам себя новой версией.
+# Без этого телефон молча запускал СТАРЫЙ установщик — и все фиксы до него
+# не доезжали (случай 0.1.0.7).
+if [ -d .git ] && command -v git >/dev/null 2>&1; then
+    _OLD="$(git rev-parse HEAD 2>/dev/null || echo '')"
+    git stash >/dev/null 2>&1 || true
+    echo "Обновляю код (git pull)..."
+    if git pull --ff-only >/dev/null 2>&1; then
+        _NEW="$(git rev-parse HEAD 2>/dev/null || echo '')"
+        if [ -n "$_OLD" ] && [ -n "$_NEW" ] && [ "$_OLD" != "$_NEW" ]; then
+            echo "Код обновился — перезапускаю установщик свежей версией."
+            exec bash "$0"
+        fi
+        echo "Обновление не требуется."
+    else
+        echo "(git pull не удался — нет сети? Продолжаю с текущими файлами.)"
+    fi
+fi
+
+# ---------- 0.1 Termux? ----------
 IS_TERMUX=false
 if [ -n "$TERMUX_VERSION" ] || [ "${PREFIX#*com.termux}" != "$PREFIX" ]; then
     IS_TERMUX=true
@@ -69,7 +91,8 @@ if $IS_TERMUX; then
     # C-расширения веб-стека переводим в pure-python — компилятор не нужен:
     export AIOHTTP_NO_EXTENSIONS=1 MULTIDICT_NO_EXTENSIONS=1
     export FROZENLIST_NO_EXTENSIONS=1 YARL_NO_EXTENSIONS=1 PROPCACHE_NO_EXTENSIONS=1
-    pip install --upgrade pip || true
+    pip install --upgrade pip >/dev/null 2>&1 \
+        || echo "(pip остался прежним — Termux разрешает только свой pip, это не страшно)"
     if python -c "import pydantic, pydantic_core" 2>/dev/null; then
         echo "pydantic уже установлен — не трогаю."
     elif pip install --only-binary :all: --extra-index-url https://termux-user-repository.github.io/pypi/ "pydantic-core==2.41.5" \

@@ -39,7 +39,14 @@ load_dotenv(_ENV_PATH)
 # заодно и ДО aiogram; плюс pure-python флаги yarl/multidict/frozenlist/
 # propcache, пропуск шага если pydantic уже стоит, баннер версии установщика
 # и внятный совет (git pull / VPN) с exit 1 вместо тихого продолжения.
-APP_VERSION = "0.1.0.7"
+# 0.1.0.8 — install.sh САМООБНОВЛЯЕТСЯ: перед установкой уводит локальные
+# правки служебных файлов в git stash (возврат: git stash pop), тянет свежий
+# код (git pull --ff-only) и перезапускает себя свежей копией (exec). Повод:
+# git pull у пользователя падал с «Your local changes ... would be overwritten
+# by merge» — телефон молча запускал СТАРЫЙ установщик (без баннера это было
+# не видно), и фиксы 0.1.0.5–0.1.0.7 до него не доезжали. Плюс мягкое
+# сообщение вместо ошибки при запрете pip обновлять самого себя в Termux.
+APP_VERSION = "0.1.0.8"
 
 # --- Основное ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()

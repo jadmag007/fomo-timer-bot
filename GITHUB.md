@@ -55,6 +55,7 @@
 | Пуш просит логин/пароль, ничего не выходит | Запусти батник ещё раз — в открывшемся окне браузера нажми Authorize. Окно не открылось: `git remote set-url origin https://github.com/jadmag007/fomo-timer-bot.git` и снова `github_push.bat` |
 | `rejected` / remote не пустой (создал репо с README на сайте) | Батник сам предложит перезалить поверх (ответь Y) — либо вручную: `git push -u origin main --force` |
 | Пушится не в тот репозиторий | `git remote set-url origin https://github.com/jadmag007/fomo-timer-bot.git` |
+| `error: Your local changes ... would be overwritten by merge` при git pull | Локальные правки служебных файлов блокируют обновление. На телефоне: `bash install.sh` сам разберётся (или `git stash && git pull`). На ПК: `git stash`, затем снова `github_push.bat` |
 | На телефоне `git pull` даёт `409 Conflict` в логе бота | Где-то крутится второй экземпляр с тем же токеном: останови бота на ПК (Ctrl+C) перед стартом на телефоне — и наоборот |
 | На телефоне `./install.sh`: Permission denied | Git с Windows не хранит exec-бит: запускай `bash install.sh` / `bash start.sh` |
 | Хочешь перенести данные (.env + data/) через git | Пошагово расписано в TERMUX.md (раздел про перенос через свой приватный репозиторий) |
