@@ -21,7 +21,11 @@ load_dotenv(_ENV_PATH)
 # exec-бит -> «./install.sh: Permission denied». Везде bash install.sh /
 # bash start.sh, install.sh сам чинит права .sh, в TERMUX.md вшит адрес
 # репозитория.
-APP_VERSION = "0.1.0.4"
+# 0.1.0.5 — фикс установки зависимостей на Termux: в репо Termux НЕТ готовых
+# aiohttp/pydantic, pydantic-core (Rust) не собирается без тулчейна (rustup
+# не умеет android-таргет) -> install.sh ставит rust+binutils из репо Termux
+# (умеет aarch64-linux-android), aiohttp в pure-python (AIOHTTP_NO_EXTENSIONS).
+APP_VERSION = "0.1.0.5"
 
 # --- Основное ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()

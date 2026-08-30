@@ -50,14 +50,19 @@ echo "Python: $($PY --version)"
 
 # ---------- 2. Окружение и зависимости ----------
 if $IS_TERMUX; then
-    # В Termux venv ненадёжен, а aiohttp берём ГОТОВЫЙ из репозитория
-    # Termux (python-aiohttp) — иначе pip будет компилировать его минут десять.
-    echo "Termux: ставлю python-aiohttp из репозитория (без долгой компиляции)..."
-    pkg install -y python-aiohttp || true
-    echo "Ставлю зависимости..."
+    # pydantic-core (зависимость aiogram) — Rust-расширение: на PyPI нет
+    # сборок под андроид, а rustup не поддерживает target android (он и
+    # писал «Rust not found, installing into a temporary directory» и падал).
+    # Собираем рустом САМОГО Termux — он умеет aarch64-linux-android из коробки.
+    # rust сам тянет clang — им же соберётся и всё остальное при случае.
+    echo "Termux: ставлю python, git и тулчейн Rust (нужен для pydantic-core)..."
+    pkg install -y python git rust binutils
+    # aiohttp переводим в pure-python — без лишней компиляции C-части
+    export AIOHTTP_NO_EXTENSIONS=1
+    echo "Ставлю зависимости (на телефоне это 10-25 минут — разовая сборка pydantic-core на Rust)..."
     pip install --upgrade pip || true
     if ! pip install -r requirements.txt; then
-        echo "Не собралось — ставлю компилятор и пробую ещё раз..."
+        echo "Не собралось — доставляю компилятор и пробую ещё раз..."
         pkg install -y build-essential
         pip install -r requirements.txt
     fi

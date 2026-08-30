@@ -6,7 +6,7 @@
 и в момент финиша придёт «Готово ✅». А если настроить автотрекинг, бот
 сам увидит таймеры из API игры и напомнит без единого нажатия.
 
-Текущая версия: **0.1.0.4** (видна в `/start`, `/апи` и в мини-аппе).
+Текущая версия: **0.1.0.5** (видна в `/start`, `/апи` и в мини-аппе).
 
 ---
 
@@ -43,9 +43,9 @@ bash start.sh      # (после git clone с Windows запускайте че�
 ### Android (Termux) 📱
 
 Тот же бот целиком на телефоне: `install.sh` и `start.sh` сами понимают
-Termux (wake-lock, готовый aiohttp без компиляции), туннель качает
-arm64-сборку cloudflared, мини-апп открывается в браузере того же телефона
-(`http://127.0.0.1:8080`). Пошаговая инструкция — **TERMUX.md**.
+Termux (wake-lock, тулчейн Rust для разовой сборки pydantic-core, запуск
+без venv), туннель качает arm64-сборку cloudflared, мини-апп открывается
+в браузере того же телефона (`http://127.0.0.1:8080`). Пошаговая инструкция — **TERMUX.md**.
 
 Для работы 24/7 удобнее VPS (`install.sh` + `start.sh` в фоне или через
 `systemd/fomo-timer.service`) либо Docker (`docker-compose.yml`). Помните:
@@ -265,6 +265,13 @@ fomo-timer-bot/
 
 ## История версий
 
+- **0.1.0.5** — фикс установки зависимостей на Termux: в репозитории Termux
+  нет готовых aiohttp/pydantic, а pydantic-core (Rust-расширение aiogram)
+  не собирается — rustup не поддерживает android-таргет. install.sh теперь
+  ставит rust+binutils из репозитория Termux (тот умеет
+  aarch64-linux-android), aiohttp переводится в pure-python
+  (AIOHTTP_NO_EXTENSIONS), честные цифры: ~1.5 ГБ и 10-25 минут на разовую
+  установку. Troubleshooting: pydantic-core/Rust-not-found.
 - **0.1.0.4** — фикс запуска на андроиде после git clone: git при пуше с
   Windows не сохраняет бит «исполняемый», поэтому `./install.sh` падал с
   «Permission denied». Команды в гайдах переведены на `bash install.sh` /
