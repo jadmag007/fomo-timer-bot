@@ -89,7 +89,20 @@ load_dotenv(_ENV_PATH)
 # (только с нашим маркером «⏰ Готово: »). Новый модуль sched_push.py,
 # флаг USERBOT_SCHEDULE (по умолчанию вкл, требует userbot.session),
 # имя бота пишется в .env само (BOT_USERNAME).
-APP_VERSION = "0.1.1.2"
+# 0.1.1.3 — МОЗГ ОПРОСНИКА: СКРЫТНОСТЬ БЕЗ ПОТЕРИ АВТОМАТИЗАЦИИ. Опросник
+# живёт как игрок: АКТИВНЫЙ (опрос раз в 300 с ±40% случайности — двух
+# одинаковых пауз подряд не бывает) -> после 3 опросов без нового таймера
+# ТИХИЙ (автопульс раз в случайные 30–55 мин) -> НОЧЬ (окно по часовой зоне,
+# по умолчанию 00:00–08:00): полный штиль игровых запросов либо 1–2
+# ночных микротика (включается в боте). Утро — не ровно в 08:00, а со
+# случайным сдвигом. Пробуждение БЕЗ тапков: любое сообщение боту (через
+# случайные 3–8 мин, чтобы не поймать переавторизацию посреди игры),
+# контрольный опрос через 30–120 с после каждого «⏰ Готово» (игрок пошёл
+# собирать — мы как раз рядом), автопульс сам находит новые таймеры.
+# Свежая реавторизация держит паузу 10 минут — игре даём успокоиться.
+# Ночное окно/микротики/тишина редактируются в боте (меню /апи → «🌙 Ночь»)
+# и на локальной странице, хранятся в базе. Кнопка/команда /app убрана.
+APP_VERSION = "0.1.1.3"
 
 # --- Основное ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -115,6 +128,46 @@ API_HEADERS_JSON = os.getenv("API_HEADERS_JSON", "").strip()
 # Теперь 300 (5 минут): опрос при старте бота, дальше раз в 5 минут — игре
 # ничего не мешает. Меньше 60 бот всё равно не возьмёт (защита от спама).
 API_POLL_INTERVAL = int(os.getenv("API_POLL_INTERVAL", "300"))
+# --- Мозг опросника: рандом везде, автопульс, ночной сон (см. BRAIN.md) ---
+# Разброс активного интервала: пауза = база * (1 ± POLL_JITTER), каждый раз
+# новая — идеальная периодичность (главная сигнатура бота) исчезает.
+POLL_JITTER = float(os.getenv("POLL_JITTER", "0.4") or 0.4)
+# Автопульс в тихом режиме (3 опроса без нового таймера): редкая проверка
+# через случайный интервал из вилки [POLL_PULSE_MIN, POLL_PULSE_MAX].
+# Пульс находит новые таймеры сам — игроку ничего нажимать не нужно.
+# Совместимость: заданный QUIET_HEARTBEAT_SEC>0 превращается в вилку из него.
+_qhs_raw = os.getenv("QUIET_HEARTBEAT_SEC", "").strip()
+_qhs = int(_qhs_raw or 0) if _qhs_raw.lstrip("-").isdigit() else 0
+POLL_PULSE_MIN = int(os.getenv("POLL_PULSE_MIN", "") or (_qhs if _qhs > 0 else 1800))
+POLL_PULSE_MAX = int(os.getenv("POLL_PULSE_MAX", "") or (_qhs if _qhs > 0 else 3300))
+# НОЧНОЙ РЕЖИМ (люди ночью спят): в окне ночи игровые запросы прекращаются.
+# Часовой пояс ночи: пусто = пояс владельца из бота (/tz), иначе IANA-имя.
+BOT_TZ = os.getenv("BOT_TZ", "").strip()
+NIGHT_START = os.getenv("NIGHT_START", "00:00").strip()
+NIGHT_END = os.getenv("NIGHT_END", "08:00").strip()
+# Тишина ночью: true — ноль запросов всю ночь; false — ночью живёт автопульс.
+NIGHT_SILENT = os.getenv("NIGHT_SILENT", "true").strip().lower() == "true"
+# Ночные микротики: 1–2 случайные проверки за ночь (на случай ночной игры).
+# Включается кнопкой в боте; NIGHT_SILENT=true при микротиках не мешает.
+NIGHT_MICROTICKS = os.getenv("NIGHT_MICROTICKS", "false").strip().lower() == "true"
+# Выход из ночи не ровно в NIGHT_END (сигнатура), а со случайным сдвигом до
+# NIGHT_WAKE_JITTER секунд (15 минут).
+NIGHT_WAKE_JITTER = int(os.getenv("NIGHT_WAKE_JITTER", "900") or 900)
+# Пробуждение по сообщению владельца: через случайные WAKE_DELAY 3–8 минут.
+# НЕ 5–30 с: игрок часто пишет боту прямо из игры — ранний опрос мог
+# поймать переавторизацию и выбить сессию.
+WAKE_DELAY_MIN = int(os.getenv("WAKE_DELAY_MIN", "180") or 180)
+WAKE_DELAY_MAX = int(os.getenv("WAKE_DELAY_MAX", "480") or 480)
+# «Игрок занят»: если владелец писал боту в последние OWNER_BUSY_WINDOW сек,
+# плановые опросы откладываются (скорее всего он прямо сейчас в игре).
+OWNER_BUSY_WINDOW = int(os.getenv("OWNER_BUSY_WINDOW", "180") or 180)
+# После реанимации ключа не трогаем игру REAUTH_COOLDOWN секунд.
+REAUTH_COOLDOWN = int(os.getenv("REAUTH_COOLDOWN", "600") or 600)
+# Контрольный опрос после доставленного «⏰ Готово»: игрок идёт собирать —
+# случайные 30–120 с, наша активность совпадает с его.
+CONTROL_POLL_MIN = int(os.getenv("CONTROL_POLL_MIN", "30") or 30)
+CONTROL_POLL_MAX = int(os.getenv("CONTROL_POLL_MAX", "120") or 120)
+QUIET_HEARTBEAT_SEC = int(os.getenv("QUIET_HEARTBEAT_SEC", "0") or 0)
 # Ваш tg_id для автотрекинга (узнать: @userinfobot). Пусто — берётся первый /start боту.
 API_OWNER_TG_ID = int(os.getenv("API_OWNER_TG_ID", "0") or 0)
 # Спрашивать «Да/Нет» перед добавлением найденных таймеров. По умолчанию НЕТ —
@@ -331,7 +384,7 @@ def reload():
     global FOMO_INIT_DATA, FOMO_API_BASE, FOMO_GAME_BOT, FOMO_APP_NAME, FOMO_LANG, FOMO_REAUTH_INTERVAL
     global FOMO_WEB_ORIGIN, USERBOT_API_ID, USERBOT_API_HASH, USERBOT_SESSION_PATH
     global FOMO_ALL_INTERVAL, SIEGE_PREWARN_SEC  # без этого reload писал бы в локальную переменную
-    global WEBAPP_ENABLED, WEBAPP_PORT, USERBOT_SCHEDULE, BOT_USERNAME
+    global WEBAPP_ENABLED, WEBAPP_PORT, USERBOT_SCHEDULE, BOT_USERNAME, QUIET_HEARTBEAT_SEC
     try:
         load_dotenv(_ENV_PATH, override=True)
     except Exception:
@@ -376,6 +429,60 @@ def reload():
     except ValueError:
         WEBAPP_PORT = 8080
     BOT_USERNAME = os.getenv("BOT_USERNAME", "").strip()
+    try:
+        QUIET_HEARTBEAT_SEC = int(os.getenv("QUIET_HEARTBEAT_SEC", "0") or 0)
+    except ValueError:
+        QUIET_HEARTBEAT_SEC = 0
+    global POLL_JITTER, POLL_PULSE_MIN, POLL_PULSE_MAX, BOT_TZ
+    global NIGHT_START, NIGHT_END, NIGHT_SILENT, NIGHT_MICROTICKS, NIGHT_WAKE_JITTER
+    global WAKE_DELAY_MIN, WAKE_DELAY_MAX, OWNER_BUSY_WINDOW, REAUTH_COOLDOWN
+    global CONTROL_POLL_MIN, CONTROL_POLL_MAX
+    try:
+        POLL_JITTER = float(os.getenv("POLL_JITTER", "0.4") or 0.4)
+    except ValueError:
+        POLL_JITTER = 0.4
+    _qhs = QUIET_HEARTBEAT_SEC
+    try:
+        POLL_PULSE_MIN = int(os.getenv("POLL_PULSE_MIN", "") or (_qhs if _qhs > 0 else 1800))
+    except ValueError:
+        POLL_PULSE_MIN = 1800
+    try:
+        POLL_PULSE_MAX = int(os.getenv("POLL_PULSE_MAX", "") or (_qhs if _qhs > 0 else 3300))
+    except ValueError:
+        POLL_PULSE_MAX = 3300
+    BOT_TZ = os.getenv("BOT_TZ", "").strip()
+    NIGHT_START = os.getenv("NIGHT_START", "00:00").strip()
+    NIGHT_END = os.getenv("NIGHT_END", "08:00").strip()
+    NIGHT_SILENT = os.getenv("NIGHT_SILENT", "true").strip().lower() == "true"
+    NIGHT_MICROTICKS = os.getenv("NIGHT_MICROTICKS", "false").strip().lower() == "true"
+    try:
+        NIGHT_WAKE_JITTER = int(os.getenv("NIGHT_WAKE_JITTER", "900") or 900)
+    except ValueError:
+        NIGHT_WAKE_JITTER = 900
+    try:
+        WAKE_DELAY_MIN = int(os.getenv("WAKE_DELAY_MIN", "180") or 180)
+    except ValueError:
+        WAKE_DELAY_MIN = 180
+    try:
+        WAKE_DELAY_MAX = int(os.getenv("WAKE_DELAY_MAX", "480") or 480)
+    except ValueError:
+        WAKE_DELAY_MAX = 480
+    try:
+        OWNER_BUSY_WINDOW = int(os.getenv("OWNER_BUSY_WINDOW", "180") or 180)
+    except ValueError:
+        OWNER_BUSY_WINDOW = 180
+    try:
+        REAUTH_COOLDOWN = int(os.getenv("REAUTH_COOLDOWN", "600") or 600)
+    except ValueError:
+        REAUTH_COOLDOWN = 600
+    try:
+        CONTROL_POLL_MIN = int(os.getenv("CONTROL_POLL_MIN", "30") or 30)
+    except ValueError:
+        CONTROL_POLL_MIN = 30
+    try:
+        CONTROL_POLL_MAX = int(os.getenv("CONTROL_POLL_MAX", "120") or 120)
+    except ValueError:
+        CONTROL_POLL_MAX = 120
     try:
         USERBOT_API_ID = int(os.getenv("USERBOT_API_ID", "6") or 6)
     except ValueError:

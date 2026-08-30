@@ -11,6 +11,11 @@
   tdeny:{gid}     — «Нет»: не добавлять (и больше не предлагать эти)
   ask             — переключить режим подтверждения (кнопка в /апи)
   trace           — переключить трассировку (кнопка в /апи)
+  api             — назад на экран /апи из ночного подменю
+  night           — подменю «🌙 Ночной режим» (окно сна/тишина/микротики)
+  nhs±/nhe±       — сдвинуть начало/конец ночи на 30 минут
+  nsil / nmic     — тишина ночью / ночные микротики вкл-выкл
+  nreset          — вернуть ночной режим к дефолтам .env
   pause           — пауза/продолжить: остановить и вернуть пуши
   help            — справка
 
@@ -42,12 +47,36 @@ import config
 import db
 import apitrace as trace_mod
 import pause_state
+import pollbrain
 import sched_push
 import webapp_server
 from util import fmt_clock, fmt_delta, local_str, parse_duration, safe_tz
 
 router = Router()
 log = logging.getLogger("handlers")
+
+
+# --- Мозг опросника: владелец проявился — будим опросник (3–8 мин, случайные) ---
+# Средняя прослойка (middleware): срабатывает на ЛЮБОЕ сообщение и кнопку,
+# ничего перехватывать не нужно. Ранний опрос опасен: игрок часто пишет
+# прямо из игры — переавторизация выбьет сессию.
+
+@router.message.middleware()
+async def _wake_mw(handler, event: Message, data):
+    try:
+        api_poller.note_user_seen(event.from_user.id if event.from_user else 0)
+    except Exception:
+        pass
+    return await handler(event, data)
+
+
+@router.callback_query.middleware()
+async def _wake_cb_mw(handler, event: CallbackQuery, data):
+    try:
+        api_poller.note_user_seen(event.from_user.id if event.from_user else 0)
+    except Exception:
+        pass
+    return await handler(event, data)
 
 # «Ждём ввод своего времени / пояса» (in-memory; после рестарта просто вводим ещё раз)
 _PENDING_CUSTOM = set()   # tg_id
@@ -74,7 +103,7 @@ MENU_TEXT = (
     "<code>/т 22:24</code>) — и в момент финиша придёт «Готово ✅».\n"
     "Формат как в игре: <code>22:24</code> = 22 мин 24 с, "
     "<code>1:28:10</code> = 1 ч 28 м 10 с.\n"
-    "🎯 Все таймеры на одном экране — в браузере: команда <code>/app</code>.\n\n"
+    "🎯 Все таймеры — кнопка «📋 Таймеры» или <code>/таймеры</code>.\n\n"
     f"🧪 <i>Fomo Timer Bot v{config.APP_VERSION}</i>"
 )
 
@@ -209,7 +238,7 @@ def kb_tz():
 
 
 def kb_api():
-    """Переключатели на экране /апи: подтверждение Да/Нет и трассировка."""
+    """Переключатели на экране /апи: подтверждение, трассировка, ночной режим."""
     ask_label = ("🔔 Подтверждение Да/Нет: ВКЛ — выключить" if config.API_ASK_BEFORE_ADD
                  else "🔔 Подтверждение Да/Нет: выкл — включить")
     trace_label = ("🧪 Трассировка API: ВКЛ — выключить" if config.API_TRACE
@@ -217,6 +246,7 @@ def kb_api():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=ask_label, callback_data="ask")],
         [InlineKeyboardButton(text=trace_label, callback_data="trace")],
+        [InlineKeyboardButton(text="🌙 Ночной режим / скрытность", callback_data="night")],
     ])
 
 
@@ -300,15 +330,17 @@ def help_text():
         "<b>Команды:</b>\n"
         "<code>/т 22:24 лесопилка</code> — таймер (подпись необязательна)\n"
         "<code>/таймеры</code> — список активных · <code>/пояс</code> — часовой пояс\n"
-        "<code>/апи</code> — автотрекинг · <code>/вопросы</code> — Да/Нет вкл/выкл\n"
+        "<code>/апи</code> — автотрекинг (там же 🌙 ночной режим)\n"
+        "<code>/вопросы</code> — Да/Нет вкл/выкл\n"
+        "<code>/обновить</code> — внеочередной опрос прямо сейчас\n"
         "<code>/пауза</code> — остановить/вернуть пуши (уходя от компа)\n"
         "<code>/трассировка</code> — лог сырых ответов API вкл/выкл\n"
         "<code>/трейслог</code> — прислать файл trace.log · "
         "<code>/help</code> — справка\n\n"
         "<b>🌐 Страница таймеров</b>: открой в браузере на устройстве с ботом "
-        "<code>http://127.0.0.1:8080</code> (или отправь боту <code>/app</code> — он "
-        "подскажет адрес) — все таймеры сразу, живые отсчёты, тихий режим по "
-        "группам, отмена. Уведомления в чат приходят как раньше.\n\n"
+        f"<code>{webapp_server.local_url()}</code> — все таймеры сразу, живые "
+        "отсчёты, тихий режим по группам, отмена и настройки ночного режима. "
+        "Уведомления в чат приходят как раньше.\n\n"
         "<b>Автотрекинг:</b> положите <code>fomo.txt</code> в папку бота или в "
         "<code>token_updates</code> — таймеры будут ставиться сами, без "
         "вопросов. Не отображаются клановые сундуки/награды аванпостов? "
@@ -358,6 +390,26 @@ def _api_status_body(st):
         lines.append("API: " + html.escape(", ".join(st["hosts"])))
     lines.append(f"Интервал опроса: {st['interval']} с · добавлено таймеров: {st['added_total']}"
                  + (f" · предложено: {st['proposed_total']}" if st.get("proposed_total") else ""))
+    if st.get("quiet"):
+        lines.append("🌙 <b>Тихий режим</b>: автопульс раз в 30–55 мин — новые "
+                     "таймеры найду сам, ничего нажимать не нужно. Напиши боту "
+                     "что угодно — проснусь раньше (через несколько минут).")
+    else:
+        lines.append("▶️ Режим: активное слежение — случайные паузы "
+                     f"{int(st['interval'] * (1 - config.POLL_JITTER))}–"
+                     f"{int(st['interval'] * (1 + config.POLL_JITTER))} с "
+                     "(каждый раз новые — как живой игрок)")
+    night = st.get("night") or {}
+    if night:
+        nstate = ("💤 сейчас идёт ночное окно" if night.get("is_night")
+                  else "проснёт случайно после конца окна")
+        lines.append(
+            f"🌙 Ночь: <code>{night.get('start', '00:00')}–{night.get('end', '08:00')}</code> "
+            f"({html.escape(str(night.get('tz', '—')))}) · "
+            + ("полная тишина" if night.get("silent") and not night.get("microticks")
+               else "микротики 1–2 за ночь" if night.get("microticks")
+               else "ночью живёт автопульс")
+            + f", {nstate}; настроить — кнопка ниже")
     if st.get("ask_mode"):
         lines.append("Режим: новые таймеры сначала показываю списком — добавлю после «Да»")
     else:
@@ -457,30 +509,6 @@ async def cmd_menu(message: Message):
     await message.answer(menu_text(), reply_markup=kb_main(message.from_user.id))
 
 
-@router.message(Command("app"))
-async def cmd_app(message: Message):
-    """Страница таймеров: адрес в браузере + как открыть на телефоне."""
-    await _send_app(message)
-
-
-async def _send_app(message: Message):
-    db.upsert_user(message.from_user.id, config.DEFAULT_TZ)
-    if not config.WEBAPP_ENABLED:
-        await message.answer(
-            "🌐 Страница таймеров выключена (WEBAPP_ENABLED=false в .env). "
-            "Включите и перезапустите <code>start.bat</code>.")
-        return
-    url = webapp_server.local_url()
-    await message.answer(
-        "🌐 <b>Страница таймеров — в обычном браузере</b>\n"
-        f"Адрес: <code>{url}</code> — открой его на том устройстве, где запущен "
-        "бот (на ПК — браузер ПК; на телефоне в Termux — браузер телефона).\n\n"
-        "На экране: все таймеры сразу с живыми отсчётами, тихий режим по "
-        "группам, отмена таймеров, кнопка «Обновить». В Chrome на телефоне "
-        "можно «Добавить на главный экран» — будет иконка как у приложения.\n\n"
-        "Уведомления в чат приходят как раньше и от страницы не зависят.")
-
-
 @router.message(Command("ask"))
 async def cmd_ask(message: Message):
     """Переключить режим подтверждения (Да/Нет ↔ молча), с записью в .env."""
@@ -564,6 +592,30 @@ async def cmd_api_cyr(message: Message):
     await message.answer(api_status_text(), reply_markup=kb_api())
 
 
+@router.message(Command("refresh", "обновить"))
+async def cmd_refresh(message: Message):
+    """Разбудить опросы из тихого режима и обновить таймеры прямо сейчас."""
+    was_quiet = bool(api_poller.status().get("quiet"))
+    api_poller.request_wake("команда /обновить")
+    await message.answer("🔄 Обновляю таймеры…")
+    try:
+        await api_poller.poll_once(message.bot)
+    except Exception:
+        log.exception("/обновить: опрос не удался")
+    quiet_now = bool(api_poller.status().get("quiet"))
+    if quiet_now:
+        await message.answer(
+            "🌙 Таймеры без изменений — остаюсь в тихом режиме (опросы спят).\n"
+            "Напоминания работают: поставленные таймеры и отложенные пуши "
+            "на серверах Telegram никуда не денутся.")
+    else:
+        st = api_poller.status()
+        extra = " Опросы вернулись в обычный ритм." if was_quiet else ""
+        await message.answer(
+            f"✅ Обновлено. Авто-таймеров сейчас: {st['added_total']} "
+            f"(всего добавлено за всё время).{extra}")
+
+
 @router.message(F.text.regexp(r"^/(вопросы|подтверждение|ask)(@\w+)?$"))
 async def cmd_ask_cyr(message: Message):
     await cmd_ask(message)
@@ -577,11 +629,6 @@ async def cmd_trace_cyr(message: Message):
 @router.message(F.text.regexp(r"^/(трейслог|tracelog)(@\w+)?$"))
 async def cmd_tracelog_cyr(message: Message):
     await cmd_tracelog(message)
-
-
-@router.message(F.text.regexp(r"^/(приложение|страница)(@\w+)?$"))
-async def cmd_app_cyr(message: Message):
-    await _send_app(message)
 
 
 # ---------- Callbacks ----------
@@ -725,6 +772,89 @@ async def cb_trace_toggle(cb: CallbackQuery):
 async def cb_help(cb: CallbackQuery):
     await edit(cb, help_text(), kb_back_menu())
     await cb.answer()
+
+
+# ---------- Ночной режим (подменю экрана /апи, скрытность) ----------
+
+def night_text():
+    """Экран «🌙 Ночной режим»: окно сна, тишина, микротики."""
+    st = api_poller.status()
+    n = st.get("night") or {}
+    mode = st.get("mode")
+    if n.get("is_night"):
+        state = "💤 сейчас идёт ночное окно — игровых запросов нет"
+    elif mode == "quiet":
+        state = "🌙 тихий режим — автопульс раз в 30–55 мин"
+    else:
+        state = "▶️ активное слежение"
+    return (
+        "🌙 <b>Ночной режим</b> (скрытность + батарея)\n\n"
+        f"Окно сна: <b>{n.get('start', '00:00')} → {n.get('end', '08:00')}</b> "
+        f"({html.escape(str(n.get('tz', '—')))})\n"
+        f"Тишина ночью: <b>{'ВКЛ — ноль запросов к игре' if n.get('silent') else 'выкл — ночью живёт автопульс'}</b>\n"
+        f"Микротики: <b>{'ВКЛ — 1–2 проверки за ночь' if n.get('microticks') else 'выкл'}</b>\n"
+        f"Сейчас: {state}\n\n"
+        "Люди ночью спят — и бот спит. Окно двигается кнопками ±30 минут, "
+        "хранится в базе и переживает рестарт. Утро начинается не ровно по "
+        "часам, а со случайным сдвигом (до 15 минут).\n\n"
+        "Напоминания ночью ПРИХОДЯТ как обычно: поставленные таймеры пушит "
+        "планировщик, а отложенные пуши живут на серверах Telegram."
+    )
+
+
+def kb_night():
+    st = api_poller.status()
+    n = st.get("night") or {}
+    rows = [
+        [InlineKeyboardButton(text="◀️ 30м", callback_data="nhs-"),
+         InlineKeyboardButton(text=f"🌙 {n.get('start', '00:00')}", callback_data="noop"),
+         InlineKeyboardButton(text="30м ▶️", callback_data="nhs+")],
+        [InlineKeyboardButton(text="◀️ 30м", callback_data="nhe-"),
+         InlineKeyboardButton(text=f"☀️ {n.get('end', '08:00')}", callback_data="noop"),
+         InlineKeyboardButton(text="30м ▶️", callback_data="nhe+")],
+        [InlineKeyboardButton(
+             text="💤 Тишина: " + ("ВКЛ" if n.get("silent") else "выкл"),
+             callback_data="nsil"),
+         InlineKeyboardButton(
+             text="🔬 Микротики: " + ("ВКЛ" if n.get("microticks") else "выкл"),
+             callback_data="nmic")],
+        [InlineKeyboardButton(text="↩️ Сбросить к дефолту", callback_data="nreset")],
+        [InlineKeyboardButton(text="⬅️ К автотрекингу", callback_data="api")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data == "api")
+async def cb_api_screen(cb: CallbackQuery):
+    """Назад из ночного подменю на экран /апи."""
+    await edit(cb, api_status_text(), kb_api())
+    await cb.answer()
+
+
+@router.callback_query(F.data == "night")
+async def cb_night(cb: CallbackQuery):
+    await edit(cb, night_text(), kb_night())
+    await cb.answer()
+
+
+@router.callback_query(F.data.in_({"nhs-", "nhs+", "nhe-", "nhe+",
+                                   "nsil", "nmic", "nreset"}))
+async def cb_night_edit(cb: CallbackQuery):
+    data = cb.data
+    st = pollbrain.settings()
+    if data in ("nhs-", "nhs+", "nhe-", "nhe+"):
+        key = "night_start" if data.startswith("nhs") else "night_end"
+        cur = pollbrain.parse_hhmm(st[key]) or (0, 0)
+        mins = (cur[0] * 60 + cur[1] + (30 if data.endswith("+") else -30)) % 1440
+        pollbrain.set_night(key, f"{mins // 60:02d}:{mins % 60:02d}")
+    elif data == "nsil":
+        pollbrain.set_night("night_silent", not st["night_silent"])
+    elif data == "nmic":
+        pollbrain.set_night("night_microticks", not st["night_microticks"])
+    elif data == "nreset":
+        pollbrain.reset_night()
+    await edit(cb, night_text(), kb_night())
+    await cb.answer("Готово")
 
 
 # ---------- Пауза (кнопка в меню и /пауза) ----------

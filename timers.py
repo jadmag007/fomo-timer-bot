@@ -32,6 +32,11 @@ import util
 import webapp_prefs
 
 try:
+    import api_poller
+except Exception:  # циклический импорт в тестах — хук не критичен
+    api_poller = None
+
+try:
     from aiogram.exceptions import TelegramForbiddenError
 except Exception:  # тесты/окружение без aiogram
     class TelegramForbiddenError(Exception):
@@ -138,6 +143,13 @@ async def tick(bot, now=None):
             # Свой пуш доставлен — запланированный на серверах дубль больше не нужен.
             # (Если доставить не удалось, запланированное СОХРАНЯЕМ: оно и есть страховка.)
             await sched_push.cancel_for(row["label"])
+            # Контрольный опрос через 30–120 с: после напоминания игрок обычно
+            # идёт собирать — ловим таймеры, поставленные при сборе (0.1.1.3).
+            if api_poller is not None:
+                try:
+                    api_poller.note_push_delivered()
+                except Exception:
+                    pass
         elif now - row["ends_at"] > DONE_RETRY_SEC:
             # сеть лежит слишком долго — закрываем, чтобы не копить хвост
             db.mark_done(row["id"])

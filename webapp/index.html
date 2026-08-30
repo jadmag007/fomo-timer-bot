@@ -53,6 +53,25 @@
     display:flex; align-items:center; justify-content:center;
   }
   .ghead .bell.off{opacity:.55}
+  .night{
+    background: var(--sec); border-radius: 14px;
+    padding: 11px 13px 12px; margin: 0 0 14px;
+    border: 1px solid var(--line);
+  }
+  .night .nhead{display:flex; align-items:center; gap:8px; margin-bottom:8px}
+  .night .nhead b{font-size:15px}
+  .night .nmode{margin-left:auto; font-size:11.5px; color:var(--hint); text-align:right}
+  .night .nrow{display:flex; align-items:center; gap:8px; margin:8px 0}
+  .night .nlab{font-size:13.5px; flex:1}
+  .nbtn{
+    border:none; background:var(--card); color:var(--text);
+    min-width:64px; padding:7px 10px; border-radius:9px;
+    font-size:13.5px; font-weight:600; cursor:pointer;
+  }
+  .nbtn.small{min-width:38px; padding:7px 8px}
+  .nbtn:active{opacity:.7}
+  .nbtn.on{background:var(--btn); color:var(--btntext)}
+  .night .nhint{font-size:11.5px; color:var(--hint); margin-top:8px}
   .card{
     background: var(--sec); border-radius: 14px;
     padding: 11px 13px 12px; margin-bottom: 8px;
@@ -258,6 +277,7 @@
 
     var main = $("main");
     main.innerHTML = "";
+    main.appendChild(nightBlock());
 
     if (!STATE.timers.length) {
       main.appendChild(emptyBlock());
@@ -433,6 +453,92 @@
     var b = $("btnRefresh");
     b.classList.remove("busy");
     b.textContent = "🔄 Обновить";
+  }
+
+  // ---------- Ночной режим (мозг опросника, /api/brain) ----------
+
+  function nightBlock(){
+    var st = (STATE && STATE.api) || {};
+    var n = st.night || {};
+    var el = document.createElement("div");
+    el.className = "night";
+    el.id = "night";
+    var modeTxt = st.mode === "night" ? "💤 ночь"
+                : st.mode === "quiet" ? "🌙 автопульс"
+                : st.mode === "off" ? "выкл"
+                : "▶️ слежу";
+    var head = document.createElement("div");
+    head.className = "nhead";
+    head.innerHTML = "<b>🌙 Ночной режим</b><span class='nmode'></span>";
+    head.querySelector(".nmode").textContent =
+      n.start + "–" + n.end + " · " + modeTxt;
+    el.appendChild(head);
+
+    function row(label, cbBtn, cbMinus, cbPlus){
+      var r = document.createElement("div");
+      r.className = "nrow";
+      var lab = document.createElement("span");
+      lab.className = "nlab"; lab.textContent = label;
+      var m = document.createElement("button");
+      m.className = "nbtn small"; m.textContent = "◀"; m.onclick = cbMinus;
+      var v = document.createElement("button");
+      v.className = "nbtn"; v.textContent = cbBtn; v.onclick = function(){};
+      var p = document.createElement("button");
+      p.className = "nbtn small"; p.textContent = "▶"; p.onclick = cbPlus;
+      r.appendChild(lab); r.appendChild(m); r.appendChild(v); r.appendChild(p);
+      return r;
+    }
+    el.appendChild(row("🌙 Начало сна", n.start || "00:00",
+      function(){ brainSet("night_start", shift30(n.start, -30)); },
+      function(){ brainSet("night_start", shift30(n.start, 30)); }));
+    el.appendChild(row("☀️ Подъём", n.end || "08:00",
+      function(){ brainSet("night_end", shift30(n.end, -30)); },
+      function(){ brainSet("night_end", shift30(n.end, 30)); }));
+
+    var tog = document.createElement("div");
+    tog.className = "nrow";
+    var lab = document.createElement("span");
+    lab.className = "nlab"; lab.textContent = "Тишина / микротики";
+    var b1 = document.createElement("button");
+    b1.className = "nbtn" + (n.silent ? " on" : "");
+    b1.textContent = n.silent ? "💤 ВКЛ" : "💤 выкл";
+    b1.onclick = function(){ brainSet("night_silent", !n.silent); };
+    var b2 = document.createElement("button");
+    b2.className = "nbtn" + (n.microticks ? " on" : "");
+    b2.textContent = n.microticks ? "🔬 ВКЛ" : "🔬 выкл";
+    b2.onclick = function(){ brainSet("night_microticks", !n.microticks); };
+    tog.appendChild(lab); tog.appendChild(b1); tog.appendChild(b2);
+    el.appendChild(tog);
+
+    var hint = document.createElement("div");
+    hint.className = "nhint";
+    hint.textContent = "Ночью запросов к игре нет (люди спят), утро — со случайным "
+      + "сдвигом. Напоминания приходят как обычно — отложенные пуши живут на "
+      + "серверах Telegram. Микротики: 1–2 проверки за ночь.";
+    el.appendChild(hint);
+    return el;
+  }
+
+  function shift30(hhmm, delta){
+    var parts = String(hhmm || "00:00").split(":");
+    var mins = (parseInt(parts[0], 10) || 0) * 60 + (parseInt(parts[1], 10) || 0);
+    mins = ((mins + delta) % 1440 + 1440) % 1440;
+    var h = Math.floor(mins / 60), m = mins % 60;
+    return (h < 10 ? "0" : "") + h + ":" + (m < 10 ? "0" : "") + m;
+  }
+
+  function brainSet(key, value){
+    post("/api/brain", {key: key, value: value}, function(j){
+      if (j.ok) {
+        toast("🌙 Ночной режим обновлён");
+        if (STATE && STATE.api) {
+          STATE.api.night = j.night || STATE.api.night;
+          if (key === "night_silent" && STATE.api.night) STATE.api.night.silent = !!value;
+          if (key === "night_microticks" && STATE.api.night) STATE.api.night.microticks = !!value;
+        }
+        render();
+      } else toast(j.error || "не получилось");
+    });
   }
 
   function renderBar(){

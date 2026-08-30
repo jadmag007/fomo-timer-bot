@@ -29,6 +29,7 @@ import asyncio
 import html
 import json
 import logging
+import random
 import re
 import time
 from datetime import datetime, timezone
@@ -40,6 +41,7 @@ import config
 import db
 import fomo_client
 import pause_state
+import pollbrain
 import apitrace as trace_mod
 import sched_push
 import translations as tr
@@ -95,21 +97,176 @@ _STATE = {
     "added_total": 0,      # сколько авто-таймеров поставлено за всё время
     "proposed_total": 0,   # сколько таймеров предложено кнопками Да/Нет
     "reauth_seen": 0.0,    # unix последней РЕАНИМАЦИИ ключа, уже показанной владельцу
+    "quiet": False,        # тихий режим: опросы остановлены (3 опроса без нового таймера)
+    "quiet_strikes": 0,    # сколько опросов подряд без изменений в таймерах
 }
 
 
 def reset_state():
     """Сброс после обновления токена (вызывает watcher)."""
+    global _LAST_SNAPSHOT
     _SEEN.clear()
+    _LAST_SNAPSHOT = None
     _STATE.update(last_poll=None, last_all_poll=0.0, last_all_status=None,
                   last_all_found=0, last_all_added=0, last_all_error="",
                   last_status=None, last_error="", token_dead=False,
-                  dead_notified=False)
+                  dead_notified=False, quiet=False, quiet_strikes=0)
 
 
 def state_urls():
     """API_STATE_URL -> список URL (поддерживаем несколько через запятую)."""
     return [u.strip() for u in config.API_STATE_URL.split(",") if u.strip()]
+
+
+# ---------- Тихий режим (скрытность + экономия батареи) ----------
+# Если 3 опроса подряд таймеры НЕ изменились — игрок явно не в игре, и каждый
+# следующий опрос оставляет след на сервере игры и будит сеть телефона
+# без пользы. Опросник переходит на АВТОПУЛЬС: одна проверка раз в случайные
+# 30–55 минут (POLL_PULSE_MIN/MAX) — сам находит новые таймеры, тапать
+# ничего не нужно. Пуши уже поставленных таймеров и отложенные пуши на
+# серверах Telegram продолжают работать как ни в чём не бывало.
+# НОЧЬ (pollbrain.is_night) перекрывает всё: в окне ночи запросов нет
+# вовсе (либо 1–2 микротика, если включены в меню).
+
+QUIET_STRIKES_MAX = 3   # сколько опросов подряд без изменений -> засыпаем
+_WAKE = False           # флаг явного «разбудить» (страница/команда/файл)
+_LAST_SNAPSHOT = None   # frozenset(label, ends_at) последнего опроса
+
+# --- Будильники без тапков (0.1.1.3, мозг опросника — pollbrain.py) ---
+_WAKE_AT = 0.0          # запланированное пробуждение после сообщения владельца
+_PUSH_POLL_AT = 0.0     # контрольный опрос после доставленного «⏰ Готово»
+_LAST_USER_TS = 0.0     # когда владелец В ПОСЛЕДНИЙ РАЗ писал боту («занят»)
+_LAST_USER_ID = 0
+_OWNER_ID_CACHE = (0.0, 0)   # кэш id владельца (60 с), чтобы не дёргать БД
+
+
+def _owner_id_cached():
+    now = time.time()
+    ts, oid = _OWNER_ID_CACHE
+    if now - ts < 60:
+        return oid
+    oid = 0
+    try:
+        if config.API_OWNER_TG_ID:
+            oid = int(config.API_OWNER_TG_ID)
+        else:
+            u = db.first_user()
+            oid = int(u["tg_id"]) if u else 0
+    except Exception:
+        oid = 0
+    globals()["_OWNER_ID_CACHE"] = (now, oid)
+    return oid
+
+
+def note_user_seen(tg_id=0):
+    """Владелец проявился (сообщение/кнопка бота) — планируем пробуждение.
+
+    Работает на ЛЮБОМ действии в боте, ничего специально тапать не нужно.
+    Пробуждение через случайные WAKE_DELAY 3–8 минут: игрок часто пишет
+    прямо из игры, ранний опрос мог бы поймать переавторизацию и выбить
+    сессию. Если будильник уже стоит — берём более ранний из двух.
+    """
+    global _WAKE_AT, _LAST_USER_TS, _LAST_USER_ID
+    try:
+        now = time.time()
+        owner = _owner_id_cached()
+        if owner and tg_id and int(tg_id) != owner:
+            return  # чужой пользователь — не будим и «занятым» не считаем
+        _LAST_USER_TS = now
+        _LAST_USER_ID = int(tg_id or 0)
+        cand = now + pollbrain.wake_delay()
+        _WAKE_AT = cand if _WAKE_AT <= now else min(_WAKE_AT, cand)
+        log.info("Игрок проявился в боте — опрос через %s мин",
+                 max(1, int(round((_WAKE_AT - now) / 60))))
+    except Exception:
+        pass
+
+
+def note_push_delivered():
+    """«⏰ Готово» доставлено — контрольный опрос через 30–120 с.
+
+    Игрок обычно идёт собирать сразу после напоминания: наш опрос в этот
+    момент выглядит естественно и ловит таймеры, поставленные при сборе.
+    """
+    global _PUSH_POLL_AT
+    try:
+        _PUSH_POLL_AT = time.time() + pollbrain.control_delay()
+    except Exception:
+        pass
+
+
+def user_busy(now=None):
+    """Владелец недавно писал боту — скорее всего прямо сейчас в игре."""
+    now = now if now is not None else time.time()
+    return _LAST_USER_TS > 0 and now - _LAST_USER_TS < config.OWNER_BUSY_WINDOW
+
+
+def reauth_cooldown(now=None):
+    """Только что была реанимация ключа — даём игре успокоиться."""
+    now = now if now is not None else time.time()
+    last = float(getattr(fomo_client, "last_reauth_ts", 0.0) or 0.0)
+    return last > 0 and now - last < config.REAUTH_COOLDOWN
+
+
+def request_wake(reason: str = "") -> None:
+    """Разбудить опросчик из тихого режима (безопасно из любого потока)."""
+    global _WAKE
+    _WAKE = True
+    if reason:
+        log.info("Тихий режим: запрос на пробуждение (%s)", reason)
+
+
+def _snapshot(found) -> frozenset:
+    """Отпечаток списка таймеров: (метка, конец, округлённый до 5 с).
+    ends_at между опросами дрейфует на десятые доли секунды — округление
+    убирает ложные «изменения» при полностью неподвижной игре."""
+    return frozenset((str(u.get("label")), int(float(u.get("ends_at", 0)) // 5))
+                     for u in found or [])
+
+
+def _quiet_account(found, bot) -> None:
+    """Учёт «новизны» после успешного опроса: считать промахи и входить/выходить
+    из тихого режима. Список таймеров изменился = игрок активен = не спим."""
+    global _LAST_SNAPSHOT
+    snap = _snapshot(found)
+    changed = snap != _LAST_SNAPSHOT
+    _LAST_SNAPSHOT = snap
+    if changed:
+        if _STATE["quiet"]:
+            _STATE.update(quiet=False, quiet_strikes=0)
+            log.info("Тихий режим: таймеры изменились — просыпаюсь, опросы вернулись")
+            _quiet_note(bot, awake=True)
+        else:
+            _STATE["quiet_strikes"] = 0
+        return
+    if _STATE["quiet"]:
+        return
+    _STATE["quiet_strikes"] = int(_STATE.get("quiet_strikes", 0)) + 1
+    if _STATE["quiet_strikes"] >= QUIET_STRIKES_MAX:
+        _STATE["quiet"] = True
+        log.info("Тихий режим: %s опроса без нового таймера — опросы остановлены "
+                 "(пуши поставленных таймеров и отложенные на серверах Telegram "
+                 "продолжают работать)", QUIET_STRIKES_MAX)
+        _quiet_note(bot, awake=False)
+
+
+def _quiet_note(bot, awake: bool) -> None:
+    """Одно уведомление при входе в тишину и при выходе из неё."""
+    if awake:
+        text = ("☀️ <b>Опросы вернулись</b> — таймеры обновлены, слежу дальше.")
+    else:
+        text = ("🌙 <b>Тихий режим</b> — 3 опроса подряд без нового таймера. "
+                "Теперь только автопульс (раз в 30–55 мин) — запущенное "
+                "уловлю сам, ничего нажимать не нужно.\n\n"
+                "Напоминания работают как всегда: поставленные таймеры и "
+                "отложенные пуши на серверах Telegram никуда не денутся.\n\n"
+                "Заигрался? Просто напиши боту что угодно — проснусь через "
+                "несколько минут.")
+    import asyncio as _aio
+    try:
+        _aio.get_running_loop().create_task(notify_owner(bot, text))
+    except RuntimeError:
+        pass  # нет живого цикла (тесты) — уведомление не нужно
 
 
 def auth_headers():
@@ -216,6 +373,7 @@ async def _poll_fomo_native(bot=None) -> int:
         # поэтому ставим молча и в режиме вопросов тоже — без Да/Нет.
         for up in claim_ready_timers(extract_claimable(data)):
             added += maybe_add(up)
+        _quiet_account(found, bot)  # тихий режим: 3 опроса без изменений = спим
         if trace_mod.enabled():
             trace_mod.log_response("native", 200, data, found=found, added=added)
 
@@ -849,6 +1007,7 @@ async def poll_once(bot=None):
             else:
                 for up in found:
                     added += maybe_add(up)      # ставим молча
+            _quiet_account(found, bot)  # тихий режим: 3 опроса без изменений = спим
             if trace_mod.enabled():
                 trace_mod.log_response("poll", status, data, found=found, added=added)
     return added
@@ -871,7 +1030,7 @@ def status():
         "native": native,
         "hosts": [config.FOMO_API_BASE.replace("https://", "")] if native else [_host(u) for u in urls],
         "auth_preview": (config.API_AUTH_HEADER[:34] + "…") if len(config.API_AUTH_HEADER) > 34 else (config.API_AUTH_HEADER or "—"),
-        "interval": max(20, config.API_POLL_INTERVAL),
+        "interval": max(60, config.API_POLL_INTERVAL),
         "last_poll": _STATE["last_poll"],
         "last_status": _STATE["last_status"],
         "token_dead": _STATE["token_dead"],
@@ -888,7 +1047,45 @@ def status():
         "last_all_found": _STATE["last_all_found"],
         "last_all_added": _STATE["last_all_added"],
         "last_all_error": _STATE["last_all_error"],
+        "quiet": bool(_STATE.get("quiet")),
+        "quiet_strikes": int(_STATE.get("quiet_strikes", 0)),
+        # Мозг опросника: режим, ночное окно, будильники (экран /апи, страница)
+        "mode": _mode(),
+        "night": _night_info(),
+        "wake_at": _WAKE_AT if _WAKE_AT > time.time() else None,
+        "push_poll_at": _PUSH_POLL_AT if _PUSH_POLL_AT > time.time() else None,
     }
+
+
+def _mode():
+    """Текущий режим опросника: night / quiet / active / off."""
+    if not config.API_ENABLED:
+        return "off"
+    try:
+        if pollbrain.is_night():
+            return "night"
+    except Exception:
+        pass
+    if _STATE.get("quiet"):
+        return "quiet"
+    return "active"
+
+
+def _night_info():
+    """Снимок ночного режима для отображения (строка/страница)."""
+    try:
+        st = pollbrain.settings()
+        tz = pollbrain.night_tz()
+        return {
+            "start": st["night_start"],
+            "end": st["night_end"],
+            "silent": bool(st["night_silent"]),
+            "microticks": bool(st["night_microticks"]),
+            "tz": getattr(tz, "key", str(tz)),
+            "is_night": bool(pollbrain.is_night(st=st)),
+        }
+    except Exception:
+        return {}
 
 
 # --- Самовключение автотрекинга (юзербот залогинен -> fomo.txt не нужен) ---
@@ -956,16 +1153,73 @@ async def _selfenable_tick(bot=None) -> None:
                     "запустите login_bot.bat ещё раз, либо положите fomo.txt.")
 
 
+async def _do_poll(bot) -> None:
+    """Один опрос с обработкой ошибки (цикл не должен умирать)."""
+    try:
+        await poll_once(bot)
+    except Exception:
+        log.exception("Ошибка опроса API (продолжаю по расписанию)")
+
+
+async def _sleep_until(target_ts) -> None:
+    """Спать до момента, но будильники прерывают раньше срока.
+
+    Без этого «проснусь через 3–8 минут» не сработало бы: цикл досыпал бы
+    остаток длинного сна (пульс до 55 мин, ночь до 10 мин). Проснувшись,
+    цикл сам увидит будильник и опросит игру. Куски по 5 с без сети —
+    дешевле будильника не бывает.
+    """
+    while True:
+        now = time.time()
+        if now >= target_ts:
+            return
+        if _WAKE:
+            return
+        if _WAKE_AT and now >= _WAKE_AT:
+            return
+        if _PUSH_POLL_AT and now >= _PUSH_POLL_AT:
+            return
+        await asyncio.sleep(min(5.0, target_ts - now))
+
+
+async def _sleep_wake() -> None:
+    """Пауза после опроса (продолжительность решает _next_sleep)."""
+    await _sleep_until(time.time() + _next_sleep())
+
+
+def _next_sleep() -> float:
+    """Пауза после опроса: база ± джиттер; мёртвый ключ — 300 с.
+
+    Если опрос только что утихомирил нас в тихий режим — следующий цикл
+    сам уйдёт на автопульс, здесь длинную паузу не задаём.
+    """
+    if _STATE["token_dead"]:
+        return 300.0
+    if _STATE.get("quiet"):
+        return min(30.0, pollbrain.pulse_delay())
+    return pollbrain.jittered(config.API_POLL_INTERVAL)
+
+
 async def poll_forever(_bot=None):
-    """Вечный цикл. Пока настройки нет — тихо ждёт (файл в token_updates/ или
-    в корне папки включит всё сам)."""
+    """Вечный цикл — мозг опросника (pollbrain.py, BRAIN.md).
+
+    Режимы: АКТИВНЫЙ (база ± случайность) -> ТИХИЙ (автопульс 30–55 мин) ->
+    НОЧЬ (штиль или 1–2 микротика). Пробуждение без тапков: сообщение
+    владельца (через 3–8 мин), контрольный опрос после «⏰ Готово» (30–120 с),
+    /обновить и «Обновить» на странице. Пока настроек нет — тихо ждёт.
+    """
+    global _WAKE, _WAKE_AT, _PUSH_POLL_AT
     bot = _bot
     if not config.API_ENABLED:
         log.info("Автотрекинг выключен — жду ключ (fomo.txt в корне или %s/, "
                  "либо вход юзербота login_bot.bat): включусь сам, без "
                  "рестарта.", config.TOKEN_UPDATES_DIR)
     else:
-        log.info("Автотрекинг запущен (интервал %ss)", max(60, config.API_POLL_INTERVAL))
+        log.info("Автотрекинг запущен (интервал ~%s с ±%d%%, автопульс %s–%s с, "
+                 "ночь %s–%s)",
+                 max(60, config.API_POLL_INTERVAL), int(config.POLL_JITTER * 100),
+                 config.POLL_PULSE_MIN, config.POLL_PULSE_MAX,
+                 config.NIGHT_START, config.NIGHT_END)
     while True:
         try:
             if not config.API_ENABLED:
@@ -975,15 +1229,77 @@ async def poll_forever(_bot=None):
             if not (native_mode() or (state_urls() and config.API_AUTH_HEADER)):
                 await asyncio.sleep(5)
                 continue
-            try:
-                await poll_once(bot)
-            except Exception:
-                log.exception("Ошибка опроса API (продолжаю по расписанию)")
-            # Пока ключ мёртв — опрашиваем редко (раз в 5 мин), чтобы поймать
-            # момент, когда пользователь положил свежий fomo.txt.
-            # Раз в API_POLL_INTERVAL (по умолчанию 5 минут — чтобы не мешать
-            # игре: каждая переавторизация бота выбивает сессию игрока).
-            await asyncio.sleep(300 if _STATE["token_dead"] else max(60, config.API_POLL_INTERVAL))
+
+            now = time.time()
+            nst = pollbrain.settings()
+            night = pollbrain.is_night(now, st=nst)
+            micro = bool(nst["night_microticks"])
+            silent = bool(nst["night_silent"])
+
+            # 1) Явные будильники работают всегда, даже ночью и на паузе:
+            #    /обновить, «Обновить» на странице, свежий fomo.txt.
+            if _WAKE:
+                _WAKE = False
+                await _do_poll(bot)
+                await _sleep_wake()
+                continue
+
+            # 2) Запланированное пробуждение после сообщения владельца.
+            if _WAKE_AT and now >= _WAKE_AT:
+                _WAKE_AT = 0.0
+                await _do_poll(bot)
+                await _sleep_wake()
+                continue
+
+            # 3) Контрольный опрос после доставленного «⏰ Готово».
+            if _PUSH_POLL_AT and now >= _PUSH_POLL_AT:
+                _PUSH_POLL_AT = 0.0
+                if not (night and silent and not micro):
+                    await _do_poll(bot)
+                    await _sleep_wake()
+                    continue
+
+            # 4) НОЧЬ: полный штиль либо микротики (1–2 за окно).
+            if night:
+                _PUSH_POLL_AT = 0.0   # ночной контрольный опрос отменяем
+                if silent and not micro:
+                    await _sleep_until(now + pollbrain.morning_slumber(now))
+                    continue
+                if micro:
+                    ticks = pollbrain.night_ticks(now, st=nst)
+                    if ticks and ticks[0] <= now:
+                        # Микротик настал: один опрос и убираем его из списка.
+                        pollbrain.night_ticks_consume(now)
+                        await _do_poll(bot)
+                        await _sleep_wake()
+                        continue
+                    if not ticks:
+                        await _sleep_until(now + pollbrain.morning_slumber(now))
+                        continue
+                    await _sleep_until(min(now + 600.0, ticks[0]))
+                    continue   # спим до микротика, настройки применяются живьём
+
+            # 5) Игрок занят: писал боту в последние OWNER_BUSY_WINDOW секунд —
+            #    скорее всего прямо сейчас в игре, не лезем (переавторизация!).
+            if user_busy(now):
+                await asyncio.sleep(random.uniform(60, 150))
+                continue
+
+            # 6) Только что реанимировали ключ — даём игре успокоиться.
+            if reauth_cooldown(now):
+                await asyncio.sleep(random.uniform(90, 240))
+                continue
+
+            # 7) ТИХИЙ РЕЖИМ: автопульс раз в случайные 30–55 минут.
+            if _STATE["quiet"]:
+                await _sleep_until(time.time() + pollbrain.pulse_delay())
+                await _do_poll(bot)
+                await _sleep_wake()
+                continue
+
+            # 8) АКТИВНЫЙ опрос.
+            await _do_poll(bot)
+            await _sleep_wake()
         except asyncio.CancelledError:
             raise
         except Exception:

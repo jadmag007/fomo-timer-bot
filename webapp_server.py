@@ -21,6 +21,9 @@ API (без заголовков авторизации — доступ тол�
   POST /api/settings — {"bucket": "tTroops", "muted": true} или {"all": true}
   POST /api/refresh  — внеочередной опрос API игры (как кнопка 🔄)
   POST /api/cancel   — {"id": 12} отменить таймер
+  POST /api/brain    — {"key": "night_start", "value": "23:30"}: ночной режим
+                       (night_start/night_end "HH:MM", night_silent/
+                       night_microticks true|false, {"reset": true} — дефолты)
 """
 import json
 import logging
@@ -159,6 +162,10 @@ def _api_status():
         "last_status": s.get("last_status"),
         "last_error": s.get("last_error", ""),
         "last_all_poll": s.get("last_all_poll"),
+        # Мозг опросника: режим + ночной режим (экран настроек на странице)
+        "mode": s.get("mode", "off"),
+        "quiet": bool(s.get("quiet")),
+        "night": s.get("night") or {},
     }
 
 
@@ -243,6 +250,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/cancel":
                 self._api_cancel(data)
                 return
+            if path == "/api/brain":
+                self._api_brain(data)
+                return
         except Exception as e:
             log.exception("api POST ошибка")
             self._fail(500, str(e)[:200])
@@ -282,6 +292,27 @@ class Handler(BaseHTTPRequestHandler):
             return
         ok = db.cancel(next(iter(owner_ids)), tid)
         self._json({"ok": ok, "error": "" if ok else "таймер не найден"})
+
+    def _api_brain(self, data):
+        """Ночной режим со страницы: тот же набор, что и в меню бота."""
+        import api_poller
+        import pollbrain
+        if data.get("reset"):
+            pollbrain.reset_night()
+        else:
+            key = str(data.get("key", ""))
+            if key not in ("night_start", "night_end", "night_silent",
+                           "night_microticks", "tz"):
+                self._fail(400, "неизвестный ключ")
+                return
+            if not pollbrain.set_night(key, data.get("value")):
+                self._fail(400, "плохое значение (время — ЧЧ:ММ)")
+                return
+        try:
+            st = api_poller.status()
+        except Exception:
+            st = {"night": {}}
+        self._json({"ok": True, "night": st.get("night") or {}})
 
 
 # ---------- Запуск ----------

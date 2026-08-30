@@ -35,6 +35,10 @@ CREATE TABLE IF NOT EXISTS timers(
 );
 CREATE INDEX IF NOT EXISTS idx_timers_due ON timers(done_sent, ends_at);
 CREATE INDEX IF NOT EXISTS idx_timers_prewarn ON timers(done_sent, prenote_sent, bucket);
+CREATE TABLE IF NOT EXISTS settings(
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 # Миграции для баз, созданных прошлыми версиями: (колонка, определение).
@@ -130,6 +134,39 @@ def set_tz(tg_id, tz):
         upsert_user(tg_id)
         _db().execute("UPDATE users SET tz=? WHERE tg_id=?", (tz, tg_id))
         _db().commit()
+
+
+# ---------- Настройки (kv): ночной режим и другие тумблеры из меню ----------
+# Переживают рестарт бота; здесь хранится ТОЛЬКО то, что меняется кнопками
+# в боте/на странице (ночное окно, микротики). Остальное — в .env (config).
+
+def get_setting(key, default=""):
+    with _LOCK:
+        row = _db().execute(
+            "SELECT value FROM settings WHERE key=?", (str(key),)).fetchone()
+        return row["value"] if row else default
+
+
+def set_setting(key, value):
+    with _LOCK:
+        _db().execute(
+            "INSERT INTO settings(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(key), str(value)),
+        )
+        _db().commit()
+
+
+def del_setting(key):
+    with _LOCK:
+        _db().execute("DELETE FROM settings WHERE key=?", (str(key),))
+        _db().commit()
+
+
+def all_settings():
+    with _LOCK:
+        return {r["key"]: r["value"] for r in
+                _db().execute("SELECT key, value FROM settings").fetchall()}
 
 
 # ---------- Таймеры ----------

@@ -26,9 +26,8 @@ log = logging.getLogger("bot")
 BOT_COMMANDS = [
     BotCommand(command="t", description="⏱ Таймер: /t 22:24 лесопилка"),
     BotCommand(command="timers", description="📋 Активные таймеры"),
-    BotCommand(command="app", description="🌐 Страница таймеров в браузере"),
     BotCommand(command="tz", description="🌍 Часовой пояс"),
-    BotCommand(command="api", description="🤖 Статус автотрекинга"),
+    BotCommand(command="api", description="🤖 Статус автотрекинга и ночь"),
     BotCommand(command="ask", description="🔔 Подтверждение таймеров вкл/выкл"),
     BotCommand(command="pause", description="⏸ Пауза: остановить/вернуть пуши"),
     BotCommand(command="trace", description="🧪 Трассировка API вкл/выкл"),
