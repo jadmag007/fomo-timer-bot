@@ -50,6 +50,25 @@ def _userbot_creds() -> tuple[int, str]:
     return uid, uhash
 
 
+def build_short_name_app(entity, short_name: str):
+    """InputBotAppShortName, совместимый с ЛЮБОЙ версией telethon.
+
+    В новых версиях (layer 181+) конструктор требует bot_id (InputUser
+    бота) и short_name, в старых (telethon 1.34) — только short_name.
+    Аргументов id=/access_hash= у этого типа не существовало никогда:
+    такой вызов гарантированно падает TypeError «got an unexpected
+    keyword argument 'id'» (баг 0.1.0.8 — вход юзербота ломался на
+    этом месте на любой машине).
+    """
+    from telethon.tl.types import InputBotAppShortName, InputUser
+    iu = InputUser(user_id=entity.id, access_hash=entity.access_hash)
+    try:
+        return InputBotAppShortName(bot_id=iu, short_name=short_name)
+    except TypeError:
+        # старый telethon: слот bot_id ещё не завезли
+        return InputBotAppShortName(short_name=short_name)
+
+
 async def refresh_init_data() -> str:
     """Открыть мини-апп игры юзерботом -> свежая строка initData ('' при неудаче).
 
@@ -61,7 +80,6 @@ async def refresh_init_data() -> str:
     try:
         from telethon import TelegramClient
         from telethon.tl.functions.messages import RequestAppWebViewRequest
-        from telethon.tl.types import InputBotAppShortName
     except ImportError:
         log.warning("telethon не установлен (pip install telethon) — юзербот недоступен")
         return ""
@@ -83,8 +101,7 @@ async def refresh_init_data() -> str:
             log.warning("Сессия юзербота не авторизована — запустите login_bot.bat")
             return ""
         entity = await client.get_entity(config.FOMO_GAME_BOT)
-        app = InputBotAppShortName(id=entity.id, access_hash=entity.access_hash,
-                                   short_name=config.FOMO_APP_NAME)
+        app = build_short_name_app(entity, config.FOMO_APP_NAME)
         res = await client(RequestAppWebViewRequest(
             peer=entity, app=app, platform="android", write_allowed=False))
         url = getattr(res, "url", "") or ""

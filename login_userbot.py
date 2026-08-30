@@ -121,8 +121,10 @@ async def _menu_after_captcha(err_text: str, used: tuple[int, str]) -> tuple[int
 
 async def _login_once(spath: str, api_id: int, api_hash: str) -> bool:
     """Один заход: вход в Telegram + проверка мини-аппа игры.
-    True — всё готово; False — вошёл, но initData не найдена;
-    исключение (напр. RECAPTCHA) — пробрасывается наверх."""
+    True — сессия готова и сохранена (вход состоялся всегда);
+    False — вошёл, но ключ не получен (сессия тоже сохранена — бот
+    добудет её сам, когда сможет); исключение именно ВХОДА
+    (напр. RECAPTCHA) — пробрасывается наверх."""
     from telethon import TelegramClient
     import config
 
@@ -137,18 +139,26 @@ async def _login_once(spath: str, api_id: int, api_hash: str) -> bool:
         print(f"Вход выполнен: {me.first_name} ({uname}) — сессия: {spath}.session")
 
         print("Проверяю доступ к мини-аппу игры…")
-        from telethon.tl.functions.messages import RequestAppWebViewRequest
-        from telethon.tl.types import InputBotAppShortName
+        try:
+            from telethon.tl.functions.messages import RequestAppWebViewRequest
+            from userbot import build_short_name_app
 
-        entity = await client.get_entity(config.FOMO_GAME_BOT)
-        app = InputBotAppShortName(id=entity.id, access_hash=entity.access_hash,
-                                   short_name=config.FOMO_APP_NAME)
-        res = await client(RequestAppWebViewRequest(
-            peer=entity, app=app, platform="android", write_allowed=False))
-        url = getattr(res, "url", "") or ""
-        from urllib.parse import parse_qs, urlsplit
-        init = (parse_qs(urlsplit(url).fragment, keep_blank_values=True)
-                .get("tgWebAppData") or [None])[0]
+            entity = await client.get_entity(config.FOMO_GAME_BOT)
+            app = build_short_name_app(entity, config.FOMO_APP_NAME)
+            res = await client(RequestAppWebViewRequest(
+                peer=entity, app=app, platform="android", write_allowed=False))
+            url = getattr(res, "url", "") or ""
+            from urllib.parse import parse_qs, urlsplit
+            init = (parse_qs(urlsplit(url).fragment, keep_blank_values=True)
+                    .get("tgWebAppData") or [None])[0]
+        except Exception as e:
+            # Вход уже состоялся — сессия ВАЛИДНА и обязана сохраниться.
+            # (Баг 0.1.0.8: любая ошибка проверки удаляла готовую сессию
+            # через _drop_session, и вход приходилось повторять бесконечно.)
+            print(f"Проверка не удалась: {type(e).__name__}: {e}")
+            print("Сессия сохранена как есть — бот добудет ключ этой")
+            print("сессией сам сразу после запуска, ничего не потеряно.")
+            return True
         if init:
             import fomo_client
             print("ОК: мини-апп открылся, initData получена "
