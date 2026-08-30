@@ -31,7 +31,15 @@ load_dotenv(_ENV_PATH)
 # Запасной путь: rust+binutils из репо Termux + maturin оттуда же +
 # --no-build-isolation. В TERMUX.md — пошаговый перенос .env+data через свой
 # git-репозиторий (сделать репо приватным, PAT, git add -f, git pull).
-APP_VERSION = "0.1.0.6"
+# 0.1.0.7 — Termux, найден главный виновник повторных падений: колесо ядра
+# 2.41.5 вставало, но следующий шаг (pip install -r requirements.txt) ставил
+# СВЕЖИЙ pydantic 2.13.x, а ему нужно ядро 2.46.x — готовой сборки под андроид
+# нет, и pip снова падал в сборку Rust. Теперь ПАРА pydantic 2.12.5 +
+# pydantic-core 2.41.5 (единственное ядро в TUR для cp313/cp314) ставится
+# заодно и ДО aiogram; плюс pure-python флаги yarl/multidict/frozenlist/
+# propcache, пропуск шага если pydantic уже стоит, баннер версии установщика
+# и внятный совет (git pull / VPN) с exit 1 вместо тихого продолжения.
+APP_VERSION = "0.1.0.7"
 
 # --- Основное ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()

@@ -21,6 +21,11 @@ echo "============================================"
 echo "  Fomo Timer Bot — установка"
 echo "============================================"
 echo
+# Баннер версии: на скриншоте сразу видно, какой установщик запущен.
+# Правило обновления: сначала git pull, потом bash install.sh.
+_VER="$(grep -m1 '^APP_VERSION' config.py | cut -d '"' -f 2)"
+echo "Версия установщика: ${_VER:-?} (config.py)."
+echo
 
 # ---------- 1. Python ----------
 PY=python3
@@ -50,26 +55,49 @@ echo "Python: $($PY --version)"
 
 # ---------- 2. Окружение и зависимости ----------
 if $IS_TERMUX; then
-    # pydantic-core (зависимость aiogram) — Rust-расширение: на PyPI нет сборок
-    # под андроид, а сборка на телефоне падает (rustup не умеет android-таргет,
-    # проверено в 0.1.0.5). Готовое колесо берём из зеркала TUR PyPI —
-    # официального PyPI-зеркала Termux User Repository (колёса с тегом
-    # android_24_arm64_v8a). Секунды, без компиляции.
+    # pydantic-core (ядро pydantic, зависимость aiogram) — Rust-расширение:
+    # на PyPI нет сборок под андроид, а сборка на телефоне падает (rustup не
+    # умеет android-таргет, проверено в 0.1.0.5). Готовое колесо есть в зеркале
+    # TUR PyPI (Termux User Repository, тег android_24_arm64_v8a), но ТОЛЬКО
+    # для ядра 2.41.5. Свежий pydantic 2.13.x требует ядро 2.46.x, которого под
+    # андроид нет: 0.1.0.6 ставил колесо 2.41.5, а следующий шаг
+    # «pip install -r requirements.txt» затирал его pydantic 2.13.x — и установка
+    # снова падала в сборку Rust. Поэтому ставим ЗАРАНЕЕ зафиксированную пару
+    # pydantic 2.12.5 + pydantic-core 2.41.5 — тогда aiogram принимает готовое.
     echo "Termux: ставлю python и git..."
     pkg install -y python git
-    # aiohttp переводим в pure-python — без лишней компиляции C-части
-    export AIOHTTP_NO_EXTENSIONS=1
+    # C-расширения веб-стека переводим в pure-python — компилятор не нужен:
+    export AIOHTTP_NO_EXTENSIONS=1 MULTIDICT_NO_EXTENSIONS=1
+    export FROZENLIST_NO_EXTENSIONS=1 YARL_NO_EXTENSIONS=1 PROPCACHE_NO_EXTENSIONS=1
     pip install --upgrade pip || true
-    echo "Ставлю pydantic-core готовым колесом из зеркала TUR PyPI (без компиляции)..."
-    if pip install --only-binary :all: --extra-index-url https://termux-user-repository.github.io/pypi/ pydantic-core; then
-        echo "pydantic-core: готовое колесо установлено."
+    if python -c "import pydantic, pydantic_core" 2>/dev/null; then
+        echo "pydantic уже установлен — не трогаю."
+    elif pip install --only-binary :all: --extra-index-url https://termux-user-repository.github.io/pypi/ "pydantic-core==2.41.5" \
+        && pip install --only-binary :all: "pydantic==2.12.5"; then
+        echo "Пара pydantic 2.12.5 + pydantic-core 2.41.5: готовые колёса, без компиляции."
     else
         echo "Зеркало недоступно — запасной путь: сборка на месте (10-25 минут, разовая)..."
         pkg install -y rust binutils
-        pip install --only-binary :all: --extra-index-url https://termux-user-repository.github.io/pypi/ maturin || pip install maturin || true
-        pip install --no-build-isolation pydantic-core
+        command -v rustc >/dev/null 2>&1 || {
+            echo "Rust не поставился. Часто это VPN/сеть: выключи или смени VPN и снова запусти bash install.sh."
+            exit 1
+        }
+        pip install --only-binary :all: --extra-index-url https://termux-user-repository.github.io/pypi/ maturin \
+            || cargo install --locked --no-default-features maturin \
+            || cargo install --locked maturin
+        export PATH="$HOME/.cargo/bin:$PATH"
+        pip install --no-build-isolation "pydantic-core==2.41.5" "pydantic==2.12.5"
     fi
-    echo "Ставлю остальные зависимости..."
+    if ! python -c "import pydantic, pydantic_core" 2>/dev/null; then
+        echo "============================================"
+        echo "pydantic-core установить не удалось."
+        echo "1) Сначала git pull — вдруг установщик старый."
+        echo "2) Выключи или смени VPN — зеркало TUR живёт на github.io."
+        echo "3) Повтори: bash install.sh"
+        echo "============================================"
+        exit 1
+    fi
+    echo "Ставлю остальные зависимости (готовый pydantic aiogram примет без сборки Rust)..."
     if ! pip install -r requirements.txt; then
         echo "Не собралось — доставляю компилятор и пробую ещё раз..."
         pkg install -y build-essential
