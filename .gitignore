@@ -50,3 +50,7 @@ cloudflared
 fomo-timer-bot.zip
 github_push.bat
 github_push.bat.new
+
+# --- Служебное (телефон): недокачанные файлы и само-обновление скрипта ---
+*.part
+github_push.sh.new

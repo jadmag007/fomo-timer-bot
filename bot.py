@@ -10,7 +10,7 @@ import sys
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, MenuButtonDefault
 
 import api_poller
 import config
@@ -88,6 +88,17 @@ async def main():
         await bot.set_my_commands(BOT_COMMANDS)
     except Exception as e:
         log.warning("set_my_commands не удался: %s", e)
+
+    # Кнопка мини-аппа у поля ввода (чат-меню) была включена в старых версиях,
+    # и этот выбор ХРАНИТСЯ НА СЕРВЕРАХ TELEGRAM: удаление кода мини-аппа её
+    # не убирает — надо явно вернуть обычное меню. Сбрасываем при каждом
+    # старте (идемпотентно, несколько миллисекунд): у всех, кто обновился,
+    # кнопка «мини-апп» исчезает из чата с ботом.
+    try:
+        await bot.set_chat_menu_button(menu_button=MenuButtonDefault())
+        log.info("Кнопка мини-аппа у поля ввода сброшена — чат-меню обычное")
+    except Exception as e:
+        log.warning("Не удалось сбросить кнопку мини-аппа (чат-меню): %s", e)
 
     # Фоновые задачи: планировщик напоминаний + автотрекинг API + слежка за файлами
     _TASKS.append(asyncio.create_task(timers.scheduler_loop(bot)))
