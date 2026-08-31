@@ -1,0 +1,17 @@
+[Unit]
+Description=Fomo Timer Bot (Telegram, Fomo Fighters)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Путь к каталогу проекта поправьте под себя
+WorkingDirectory=/opt/fomo-timer-bot
+# Виртуальное окружение создаётся на шаге установки (см. README)
+ExecStart=/opt/fomo-timer-bot/.venv/bin/python bot.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,8 @@
+services:
+  fomo-timer:
+    build: .
+    container_name: fomo-timer
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data
