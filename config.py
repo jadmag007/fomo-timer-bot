@@ -174,7 +174,17 @@ load_dotenv(_ENV_PATH)
 # бэкапом .env.bak; большинство настроек применяется сразу, reload_from_env).
 # Требуется приложение Termux:API (F-Droid) + pkg install termux-api; без них
 # бот работает как раньше, недоставленные пуши повторяются по окну ретраев.
-APP_VERSION = "0.1.1.9"
+# 0.1.1.10 — понятные заголовки карточек Termux-режима и оформление карточек.
+# Заголовок карточки в шторке теперь несёт метку таймера: «✅ Готово:
+# Тренировка войск» (раньше заголовком становилась первая строка пуша —
+# «✅ Готово!», а на свёрнутой карточке Android был виден только он —
+# «непонятно, ЧТО готово»). Плюс необязательное оформление из .env (живо):
+# TERMUX_PRIO=high, TERMUX_SOUND=true, TERMUX_VIBRATE=true (по умолчанию
+# выключено — поведение тихое, как раньше). Докам — ревизия: TERMUX.md
+# оставлена только пользовательская часть (перенос данных через git-репо
+# переехал в личный GITHUB.md), из README — ссылки на все доки; BRAIN.md
+# скрыт из git (живёт только локально и в zip).
+APP_VERSION = "0.1.1.10"
 
 # --- Основное ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -347,6 +357,34 @@ def termux_notify_enabled(env_path=None) -> bool:
     (кнопка ⚙️) действует без рестарта бота. По умолчанию выключен.
     """
     raw = env_get("TERMUX_NOTIFY", os.getenv("TERMUX_NOTIFY", "false"),
+                  env_path=env_path)
+    return raw.strip().lower() == "true"
+
+
+def termux_priority(env_path=None) -> str:
+    """Приоритет карточек в шторке (TERMUX_PRIO, 0.1.1.10). Допустимо
+    low/default/high/max/min; пустое/неверное = default (как раньше).
+    Читается живо из .env — меняется кнопкой ⚙️ без рестарта.
+    """
+    raw = env_get("TERMUX_PRIO", os.getenv("TERMUX_PRIO", "default"),
+                  env_path=env_path).strip().lower()
+    return raw if raw in ("low", "default", "high", "max", "min") else "default"
+
+
+def termux_sound(env_path=None) -> bool:
+    """Звук при появлении карточки в шторке (TERMUX_SOUND=true, 0.1.1.10).
+    По умолчанию выключен (тихо, как раньше). Читается живо из .env.
+    """
+    raw = env_get("TERMUX_SOUND", os.getenv("TERMUX_SOUND", "false"),
+                  env_path=env_path)
+    return raw.strip().lower() == "true"
+
+
+def termux_vibrate(env_path=None) -> bool:
+    """Вибрация при появлении карточки в шторке (TERMUX_VIBRATE=true,
+    0.1.1.10). По умолчанию выключена (тихо, как раньше). Живое чтение .env.
+    """
+    raw = env_get("TERMUX_VIBRATE", os.getenv("TERMUX_VIBRATE", "false"),
                   env_path=env_path)
     return raw.strip().lower() == "true"
 

@@ -93,7 +93,7 @@ def done_text(row, tz):
     return text
 
 
-async def _send(bot, chat_id, text, notif_id=None) -> bool:
+async def _send(bot, chat_id, text, notif_id=None, title=None) -> bool:
     """Доставить напоминание. False = стоит повторить в ближайших тиках.
 
     Исключение составляют «перманентные» отказы (пользователь заблокировал
@@ -104,9 +104,14 @@ async def _send(bot, chat_id, text, notif_id=None) -> bool:
     показывает карточку в шторке Android. False оттуда (нет Termux:API,
     команда упала) — повторяем, как при сетевом сбое. Всё остальное — пауза,
     тихий режим групп, ретраи — работает выше по коду без изменений.
+
+    title — короткий заголовок карточки в шторке с меткой таймера
+    («✅ Готово: Тренировка войск», 0.1.1.10): на свёрнутой карточке Android
+    надёжно виден только заголовок. В Telegram title не используется —
+    там текст и так полный.
     """
     if config.termux_notify_enabled():
-        return await termux_notify.send(text, notif_id)
+        return await termux_notify.send(text, notif_id, title=title)
     try:
         await bot.send_message(chat_id, text)
         return True
@@ -156,7 +161,8 @@ async def tick(bot, now=None):
         if not _can_retry(row["id"], now):
             continue
         if await _send(bot, row["chat_id"], done_text(row, tz),
-                       notif_id=row["bucket"] or "manual"):
+                       notif_id=row["bucket"] or "manual",
+                       title="✅ Готово: {}".format(row["label"])):
             if sticky:
                 db.mark_sticky_pushed(row["id"])
             else:
@@ -195,7 +201,8 @@ async def tick(bot, now=None):
         if not _can_retry("p%s" % row["id"], now):
             continue
         if await _send(bot, row["chat_id"], prewarn_text(row, tz),
-                       notif_id=row["bucket"] or "manual"):
+                       notif_id=row["bucket"] or "manual",
+                       title="🚩 Пора войска: {}".format(row["label"])):
             db.mark_prewarn(row["id"])
             _retry_done("p%s" % row["id"])
         elif now - row["ends_at"] > PREWARN_RETRY_SEC:
@@ -216,7 +223,8 @@ async def tick(bot, now=None):
             if not _can_retry("w%s" % row["id"], now):
                 continue
             if await _send(bot, row["chat_id"], warn_text(row, tz),
-                           notif_id=row["bucket"] or "manual"):
+                           notif_id=row["bucket"] or "manual",
+                           title="⏳ Через минуту: {}".format(row["label"])):
                 db.mark_warn(row["id"])
                 _retry_done("w%s" % row["id"])
             elif now - row["ends_at"] > WARN_RETRY_SEC:

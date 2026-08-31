@@ -635,8 +635,10 @@
         + "Termux:API (F-Droid) и выполните в Termux: pkg install termux-api — "
         + "пока этого нет, пуши таймеров никуда не приходят";
     } else if (ENV_STATE.termux) {
-      h.textContent = "Вкл: напоминания таймеров приходят в шторку Android, "
-        + "в Telegram не пишутся, отложенные пуши отключены.";
+      h.textContent = "Вкл: напоминания приходят в шторку Android "
+        + "с понятным заголовком («✅ Готово: Тренировка войск»), в Telegram "
+        + "не пишутся, отложенные пуши отключены. Звук/вибро — TERMUX_SOUND "
+        + "и TERMUX_VIBRATE=true в .env ниже.";
     } else {
       h.textContent = "Выкл: напоминания приходят в Telegram, как раньше.";
     }
