@@ -26,11 +26,17 @@ from pathlib import Path
 TIME_KEY_RE = re.compile(
     r"(finish|end[sd]?_?at|complete[d]?_?(?:at|time|date)|deadline|expire[s]?_?(?:at)?|"
     r"upgrade_?(?:end|finish|complete)\w*|build_?(?:end|finish|complete)\w*|"
-    r"remaining|time_?left|left_?time|cooldown|ready_?(?:at|time)?|unlock_?(?:at|time)?)",
+    r"remaining|time_?left|left_?time|cooldown|ready_?(?:at|time)?|unlock_?(?:at|time)?|"
+    r"reset_?date|cap_?reset|"
+    r"(?:end|ends|finish|complete|expire)s?_?(?:at|time)?_?(?:ms|millis|seconds?))",
     re.IGNORECASE,
 )
 AUTH_KEY_RE = re.compile(r"(authorization|api[-_]?key|x-auth|token|bearer)", re.IGNORECASE)
 JWT_RE = re.compile(r"\beyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{5,}\b")
+# «Говорящие» адреса: эндпоинты со такими словами почти наверняка про таймеры игры
+# (…/timers, …/rooms/… — стройка, тренировка войск, исследования)
+URL_PRIORITY_RE = re.compile(
+    r"(timer|room|upgrade|build|train|research|queue|production)", re.I)
 ISO_RE = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}")
 
 
@@ -74,6 +80,75 @@ def looks_like_api(url, api_host=None):
     bad = ("telegram.org", "t.me/", "telegram-browser", "cdn-tele", "core-cache",
            "web.telegram", ".js", ".css", ".png", ".jpg", ".woff", ".svg", ".mp3")
     return not any(b in url.lower() for b in bad)
+
+
+def parse_har(har_path, api_host=None):
+    """HAR -> список записей API (для программного использования).
+
+    Каждая запись: {method, status, url, size, parsed, auth_name, auth_value,
+    time_fields}. Логика фильтрации та же, что в analyze().
+    """
+    har = json.loads(Path(har_path).read_text(encoding="utf-8", errors="replace"))
+    entries = har.get("log", {}).get("entries", [])
+    rows = []
+    for e in entries:
+        req, resp = e.get("request", {}), e.get("response", {})
+        url = req.get("url", "")
+        method = req.get("method", "?").upper()
+        status = resp.get("status", 0)
+        if method == "OPTIONS" or not looks_like_api(url, api_host):
+            continue
+        body = (resp.get("content", {}) or {}).get("text") or ""
+        parsed = None
+        if body.lstrip()[:1] in ("{", "["):
+            try:
+                parsed = json.loads(body)
+            except json.JSONDecodeError:
+                parsed = None
+        auth_name, auth_value = "", ""
+        req_headers = {h.get("name", "").lower(): h.get("value", "")
+                       for h in req.get("headers", [])}
+        for h in req.get("headers", []):
+            if AUTH_KEY_RE.search(h.get("name", "")) or JWT_RE.search(h.get("value", "")):
+                auth_name, auth_value = h.get("name", ""), h.get("value", "")
+                break
+        post_data = (req.get("postData", {}) or {}).get("text") or ""
+        time_fields = []
+        if parsed is not None:
+            for p, k, v in walk(parsed):
+                kind = classify_time_value(v)
+                if kind and TIME_KEY_RE.search(k):
+                    time_fields.append((p, k, v, kind))
+        rows.append({
+            "method": method, "status": status, "url": url, "size": len(body),
+            "parsed": parsed, "auth_name": auth_name, "auth_value": auth_value,
+            "time_fields": time_fields, "post_data": post_data,
+            "req_headers": req_headers,
+        })
+    return rows
+
+
+def pick_best(rows):
+    """Самый перспективный эндпоинт для .env.
+
+    Приоритет: «говорящий» URL (timer — сильнее всего, затем room/upgrade/…),
+    затем больше таймер-полей, затем наличие тела ответа, затем 200-ответ,
+    затем с авторизацией, затем крупнее тело. При равном score побеждает
+    ПОЗДНИЙ запрос — в логе он от самой свежей сессии (ранние подписи игры
+    умирают при переподключении). Работает и для HAR без тел ответов
+    (Copy all as HAR) — там решает адрес запроса. None, если строк нет.
+    """
+    def score(r):
+        url = r["url"] or ""
+        if re.search(r"timer", url, re.I):
+            prio = 2
+        elif URL_PRIORITY_RE.search(url):
+            prio = 1
+        else:
+            prio = 0
+        return (prio, len(r["time_fields"]), r["parsed"] is not None,
+                r["status"] == 200, bool(r["auth_name"]), r["size"])
+    return max(reversed(rows), key=score) if rows else None
 
 
 def analyze(har_path, api_host=None):

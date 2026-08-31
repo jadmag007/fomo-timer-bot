@@ -8,7 +8,7 @@
   "90"      -> голое число считается минутами
 """
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, tzinfo
 from zoneinfo import ZoneInfo
 
 import config
@@ -79,14 +79,52 @@ def fmt_clock(sec):
     return f"{m:02d}:{s:02d}"
 
 
+class _FixedTZ(tzinfo):
+    """Запасной пояс, если на системе совсем нет базы таймзон.
+
+    У ZoneInfo есть атрибут .key — повторяем его, чтобы остальной код
+    (handlers.py использует user_tz(...).key) работал одинаково.
+    """
+
+    def __init__(self, key: str = "UTC", offset_minutes: int = 0):
+        self.key = key
+        self._offset = timedelta(minutes=offset_minutes)
+
+    def utcoffset(self, dt):
+        return self._offset
+
+    def tzname(self, dt):
+        return self.key
+
+    def dst(self, dt):
+        return timedelta(0)
+
+    def __repr__(self):
+        return f"_FixedTZ({self.key})"
+
+    def __str__(self):
+        return self.key
+
+
+_UTC_FALLBACK = _FixedTZ("UTC", 0)
+
+
 def safe_tz(name):
-    """ZoneInfo с фолбэком на пояс по умолчанию."""
+    """ZoneInfo с фолбэком; НИКОГДА не бросает исключений.
+
+    На Windows у Python из коробки нет базы часовых поясов (на Linux/macOS
+    она системная) — без пакета tzdata любой ZoneInfo() упадёт с
+    ZoneInfoNotFoundError. Поэтому последним рубежом возвращаем
+    фиксированный UTC.
+    """
     for candidate in (name, config.DEFAULT_TZ, "UTC"):
+        if not candidate:
+            continue
         try:
             return ZoneInfo(candidate)
         except Exception:
             continue
-    return ZoneInfo("UTC")
+    return _UTC_FALLBACK
 
 
 def local_str(ts, tz):

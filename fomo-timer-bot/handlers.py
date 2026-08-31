@@ -1,4 +1,4 @@
-"""Все хендлеры бота — минимальный ручной режим: только быстрые таймеры.
+"""Все хендлеры бота.
 
 Схема callback_data:
   menu            — главное меню (чипы длительностей)
@@ -7,37 +7,90 @@
   list            — активные таймеры
   cancel:{id}     — отменить таймер
   tz / tz:{name}  — выбор часового пояса
+  tadd:{gid}      — «Да»: добавить предложенные авто-таймеры
+  tdeny:{gid}     — «Нет»: не добавлять (и больше не предлагать эти)
+  ask             — переключить режим подтверждения (кнопка в /апи)
+  trace           — переключить трассировку (кнопка в /апи)
+  api             — назад на экран /апи из ночного подменю
+  night           — подменю «🌙 Ночной режим» (окно сна/тишина/микротики)
+  nhs±/nhe±       — сдвинуть начало/конец ночи на 30 минут
+  nsil / nmic     — тишина ночью / ночные микротики вкл-выкл
+  nreset          — вернуть ночной режим к дефолтам .env
+  pause           — пауза/продолжить: остановить и вернуть пуши
   help            — справка
 
 Команды:
   /т 22:24 лесопилка   — таймер в формате игры (мм:сс / чч:мм:сс)
   /т 45м  /т 1ч 30м    — таймер с суффиксами
-  /таймеры /пояс /help
+  /пауза               — то же, что кнопка: вкл/выкл пуши
+  /таймеры /пояс /апи /вопросы /трассировка /трейслог /help
 """
+import asyncio
 import html
 import logging
 import time
 
 from aiogram import F, Router
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     CallbackQuery,
+    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
 )
 
+import api_poller
 import config
 import db
+import apitrace as trace_mod
+import pause_state
+import pollbrain
+import sched_push
+import webapp_server
 from util import fmt_clock, fmt_delta, local_str, parse_duration, safe_tz
 
 router = Router()
 log = logging.getLogger("handlers")
 
+
+# --- Мозг опросника: владелец проявился — будим опросник (3–8 мин, случайные) ---
+# Средняя прослойка (middleware): срабатывает на ЛЮБОЕ сообщение и кнопку,
+# ничего перехватывать не нужно. Ранний опрос опасен: игрок часто пишет
+# прямо из игры — переавторизация выбьет сессию.
+
+@router.message.middleware()
+async def _wake_mw(handler, event: Message, data):
+    try:
+        api_poller.note_user_seen(event.from_user.id if event.from_user else 0)
+    except Exception:
+        pass
+    return await handler(event, data)
+
+
+@router.callback_query.middleware()
+async def _wake_cb_mw(handler, event: CallbackQuery, data):
+    try:
+        api_poller.note_user_seen(event.from_user.id if event.from_user else 0)
+    except Exception:
+        pass
+    return await handler(event, data)
+
 # «Ждём ввод своего времени / пояса» (in-memory; после рестарта просто вводим ещё раз)
 _PENDING_CUSTOM = set()   # tg_id
 _PENDING_TZ = set()       # tg_id
+
+
+@router.message(lambda m: bool(m.text) and m.text.startswith("/"))
+async def _command_while_pending(message: Message):
+    """Команда во время режима «введите время» — снять ожидание и выполнить
+    команду. Раньше флаг ожидания оставался, и следующее случайное сообщение
+    (не команда) молча ставило таймер."""
+    if message.from_user is not None:
+        _PENDING_CUSTOM.discard(message.from_user.id)
+    raise SkipHandler  # команда продолжит обычную обработку дальше по роутеру
 
 TZ_LIST = [
     "Europe/Moscow", "Europe/Kyiv", "Europe/Minsk", "Europe/Berlin",
@@ -49,8 +102,56 @@ MENU_TEXT = (
     "Запустили улучшение в игре → тапните длительность (или пришлите "
     "<code>/т 22:24</code>) — и в момент финиша придёт «Готово ✅».\n"
     "Формат как в игре: <code>22:24</code> = 22 мин 24 с, "
-    "<code>1:28:10</code> = 1 ч 28 м 10 с."
+    "<code>1:28:10</code> = 1 ч 28 м 10 с.\n"
+    "🎯 Все таймеры — кнопка «📋 Таймеры» или <code>/таймеры</code>.\n\n"
+    f"🧪 <i>Fomo Timer Bot v{config.APP_VERSION}</i>"
 )
+
+
+def menu_text():
+    """Меню с баннером паузы (если бот сейчас на паузе)."""
+    if pause_state.is_paused():
+        mins = _paused_mins()
+        return (
+            f"⏸ <b>БОТ НА ПАУЗЕ</b> — пуши не отправляются ({mins}).\n"
+            "Таймеры продолжают ставиться; всё завершённое придёт одной "
+            "сводкой после «Продолжить».\n\n" + MENU_TEXT
+        )
+    return MENU_TEXT
+
+
+def _paused_mins():
+    at = pause_state.paused_at()
+    if not at:
+        return "меньше минуты"
+    return fmt_delta(max(60, int(time.time() - at) // 60 * 60))
+
+
+def resume_summary_text(missed, paused_at):
+    """Одна сводка вместо кучи «догоняющих» пушей после снятия паузы."""
+    tz = safe_tz(config.DEFAULT_TZ)
+    mins = ""
+    if paused_at:
+        secs = max(60, int(time.time() - paused_at) // 60 * 60)
+        mins = f" (пауза длилась {fmt_delta(secs)})"
+    head = (f"▶️ <b>Пауза снята</b> — пуши снова работают{mins}.\n"
+            f"Пока вас не было, завершилось: {len(missed)}\n")
+    show = missed[:12]
+    # метки в БД хранятся УЖЕ экранированными (create_timer_reply) —
+    # второй html.escape давал на экране «&amp;» вместо символа
+    lines = [f"  ✅ {m['label']} — {local_str(m['ends_at'], tz)}"
+             for m in show]
+    extra = len(missed) - len(show)
+    if extra > 0:
+        lines.append(f"  …и ещё {extra}")
+    return head + "\n".join(lines)
+
+
+def pause_btn():
+    """Кнопка паузы для главного меню: ⏸ Пауза ↔ ▶️ Продолжить."""
+    if pause_state.is_paused():
+        return InlineKeyboardButton(text="▶️ Продолжить", callback_data="pause")
+    return InlineKeyboardButton(text="⏸ Пауза", callback_data="pause")
 
 
 # ---------- Помощники ----------
@@ -79,8 +180,11 @@ async def edit(cb: CallbackQuery, text, kb=None):
         else:
             await cb.bot.send_message(cb.from_user.id, text, reply_markup=kb)
         return
-    except TelegramBadRequest:
-        pass
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            return  # перерисовали то же самое — не надо дублировать сообщение
+    except Exception as e:
+        log.warning("edit failed: %s", e)
     try:
         if m is not None:
             await m.answer(text, reply_markup=kb)
@@ -92,7 +196,7 @@ def clamp_seconds(sec):
     return max(config.MIN_TIMER_SEC, min(int(sec), config.MAX_TIMER_SEC))
 
 
-def kb_main():
+def kb_main(tg_id):
     """Главное меню = просто чипы длительностей."""
     rows = []
     q = config.QUICK_PRESETS
@@ -105,16 +209,12 @@ def kb_main():
         InlineKeyboardButton(text="📋 Таймеры", callback_data="list"),
     ])
     rows.append([
-        InlineKeyboardButton(text=f"🌍 {user_tz(_viewer[0]).key if _viewer[0] else 'Пояс'}",
+        InlineKeyboardButton(text=f"🌍 {user_tz(tg_id).key}",
                              callback_data="tz"),
         InlineKeyboardButton(text="❓ Справка", callback_data="help"),
     ])
+    rows.append([pause_btn()])
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-# Небольшой хак: kb_main() вызывается и из колбэков, где from_user доступен;
-# запоминаем последнего активного пользователя для подписи кнопки пояса.
-_viewer = [0]
 
 
 def kb_created():
@@ -135,6 +235,19 @@ def kb_tz():
     rows.append([InlineKeyboardButton(text="✍️ Ввести вручную (IANA)", callback_data="tz:custom")])
     rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def kb_api():
+    """Переключатели на экране /апи: подтверждение, трассировка, ночной режим."""
+    ask_label = ("🔔 Подтверждение Да/Нет: ВКЛ — выключить" if config.API_ASK_BEFORE_ADD
+                 else "🔔 Подтверждение Да/Нет: выкл — включить")
+    trace_label = ("🧪 Трассировка API: ВКЛ — выключить" if config.API_TRACE
+                   else "🧪 Трассировка API: выкл — включить")
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=ask_label, callback_data="ask")],
+        [InlineKeyboardButton(text=trace_label, callback_data="trace")],
+        [InlineKeyboardButton(text="🌙 Ночной режим / скрытность", callback_data="night")],
+    ])
 
 
 def render_list(tg_id):
@@ -167,14 +280,15 @@ def render_list(tg_id):
     return "\n\n".join(lines), InlineKeyboardMarkup(inline_keyboard=cbtns)
 
 
-def create_timer_reply(msg: Message, tg_id, chat_id, label, seconds):
+async def create_timer_reply(msg: Message, tg_id, chat_id, label, seconds):
     """Создать таймер в БД и подтвердить пользователю."""
     now = time.time()
     seconds = clamp_seconds(seconds)
     ends = now + seconds
     timer_id = db.add_timer(tg_id, chat_id, html.escape(label), ends, now)
+    sched_push.kick_schedule(html.escape(label), ends)  # дубль на серверах Telegram
     tz = user_tz(tg_id)
-    msg.answer(
+    await msg.answer(
         "✅ <b>Таймер поставлен</b>\n\n"
         f"🏷 {html.escape(label)}\n"
         f"⏰ Финиш: {local_str(ends, tz)}\n"
@@ -206,8 +320,8 @@ def help_text():
         "<b>Как пользоваться:</b>\n"
         "1. Запустили улучшение в игре → посмотрите таймер на кнопке.\n"
         "2. В боте: тапните чип длительности или пришлите время текстом.\n"
-        "3. Когда время выйдет — придёт уведомление. Таймеры хранятся на "
-        "сервере, телефон можно выключать.\n\n"
+        "3. Когда время выйдет — придёт уведомление. Таймеры хранятся в "
+        "базе на компьютере, телефон можно выключать.\n\n"
         "<b>Форматы времени</b> (как в игре):\n"
         "• <code>22:24</code> — 22 мин 24 с (мм:сс)\n"
         "• <code>1:28:10</code> — 1 ч 28 м 10 с (чч:мм:сс)\n"
@@ -215,10 +329,136 @@ def help_text():
         "• голое число (<code>90</code>) — минуты\n\n"
         "<b>Команды:</b>\n"
         "<code>/т 22:24 лесопилка</code> — таймер (подпись необязательна)\n"
-        "<code>/таймеры</code> — список активных · <code>/пояс</code> — часовой пояс · "
+        "<code>/таймеры</code> — список активных · <code>/пояс</code> — часовой пояс\n"
+        "<code>/апи</code> — автотрекинг (там же 🌙 ночной режим)\n"
+        "<code>/вопросы</code> — Да/Нет вкл/выкл\n"
+        "<code>/обновить</code> — внеочередной опрос прямо сейчас\n"
+        "<code>/пауза</code> — остановить/вернуть пуши (уходя от компа)\n"
+        "<code>/трассировка</code> — лог сырых ответов API вкл/выкл\n"
+        "<code>/трейслог</code> — прислать файл trace.log · "
         "<code>/help</code> — справка\n\n"
-        "ℹ️ Позже бот сможет ставить таймеры автоматически — по данным API игры "
-        "(см. README на сервере, раздел «Автотрекинг»)."
+        "<b>🌐 Страница таймеров</b>: открой в браузере на устройстве с ботом "
+        f"<code>{webapp_server.local_url()}</code> — все таймеры сразу, живые "
+        "отсчёты, тихий режим по группам, отмена и настройки ночного режима. "
+        "Уведомления в чат приходят как раньше.\n\n"
+        "<b>Автотрекинг:</b> положите <code>fomo.txt</code> в папку бота или в "
+        "<code>token_updates</code> — таймеры будут ставиться сами, без "
+        "вопросов. Не отображаются клановые сундуки/награды аванпостов? "
+        "Включите /трассировка — по логу добавим переводы. Подробно: README.\n\n"
+        f"🧪 <i>Fomo Timer Bot v{config.APP_VERSION}</i>"
+    )
+
+
+def api_status_text():
+    st = api_poller.status()
+    body = _api_status_body(st)
+    if pause_state.is_paused():
+        return (
+            "⏸ <b>БОТ НА ПАУЗЕ</b> — пуши не отправляются ({}).\n"
+            "Трекинг работает, таймеры ставятся; завершённое придёт одной "
+            "сводкой после «Продолжить» (кнопка в меню или /пауза).\n\n"
+        ).format(_paused_mins()) + body
+    return body
+
+
+def _api_status_body(st):
+    if not st["enabled"] or not st["configured"]:
+        return (
+            "🤖 <b>Автотрекинг</b>\n"
+            "Статус: выключен (ещё нет настроек)\n\n"
+            "Два способа включить:\n\n"
+            "<b>А. Юзербот — максимум автоматизма (рекомендую)</b>\n"
+            "Запустите <code>login_bot.bat</code> рядом с ботом, введите телефон "
+            "и код из Telegram — всё. Бот сам будет получать свежие ключи игры, "
+            "никакие файлы больше не понадобятся.\n\n"
+            "<b>Б. Быстрый старт по файлу fomo.txt</b>\n"
+            "Снимите трафик игры в браузере (web.telegram.org → F12 → Network → "
+            "правый клик → «Copy all as HAR» → сохранить как <code>fomo.txt</code>) "
+            "и положите файл в папку бота или в <code>token_updates</code> — бот "
+            "сам всё настроит и добавит таймеры. Пошагово: README → «Файл fomo.txt»."
+        )
+    if st["token_dead"]:
+        head = ("🔑 <b>Автотрекинг — initData не принимается</b>\n"
+                "Запустите <code>login_bot.bat</code> или положите свежий "
+                "<code>fomo.txt</code> в папку бота / <code>token_updates</code>.")
+    elif st.get("native"):
+        head = "🤖 <b>Автотрекинг</b> — работает ✅ (нативный режим: сам подписываю и сам продлеваю ключ)"
+    else:
+        head = "🤖 <b>Автотрекинг</b> — работает ✅"
+    lines = [head]
+    if st["hosts"]:
+        lines.append("API: " + html.escape(", ".join(st["hosts"])))
+    lines.append(f"Интервал опроса: {st['interval']} с · добавлено таймеров: {st['added_total']}"
+                 + (f" · предложено: {st['proposed_total']}" if st.get("proposed_total") else ""))
+    if st.get("quiet"):
+        lines.append("🌙 <b>Тихий режим</b>: автопульс раз в 30–55 мин — новые "
+                     "таймеры найду сам, ничего нажимать не нужно. Напиши боту "
+                     "что угодно — проснусь раньше (через несколько минут).")
+    else:
+        lines.append("▶️ Режим: активное слежение — случайные паузы "
+                     f"{int(st['interval'] * (1 - config.POLL_JITTER))}–"
+                     f"{int(st['interval'] * (1 + config.POLL_JITTER))} с "
+                     "(каждый раз новые — как живой игрок)")
+    night = st.get("night") or {}
+    if night:
+        nstate = ("💤 сейчас идёт ночное окно" if night.get("is_night")
+                  else "проснёт случайно после конца окна")
+        lines.append(
+            f"🌙 Ночь: <code>{night.get('start', '00:00')}–{night.get('end', '08:00')}</code> "
+            f"({html.escape(str(night.get('tz', '—')))}) · "
+            + ("полная тишина" if night.get("silent") and not night.get("microticks")
+               else "микротики 1–2 за ночь" if night.get("microticks")
+               else "ночью живёт автопульс")
+            + f", {nstate}; настроить — кнопка ниже")
+    if st.get("ask_mode"):
+        lines.append("Режим: новые таймеры сначала показываю списком — добавлю после «Да»")
+    else:
+        lines.append("Режим: добавляю молча, без вопросов (переключить — кнопка ниже)")
+    if st.get("trace"):
+        lines.append("🧪 Трассировка: ВКЛ — пишу сырые ответы API (файл: /трейслог)")
+    if st["last_poll"]:
+        lines.append(f"Последний опрос: {int(time.time() - st['last_poll'])} с назад · HTTP {st['last_status']}")
+    # Клановые сундуки / награды аванпостов (/user/data/all) — отдельный статус:
+    # именно по этому опросу ставятся «🎁 Клановый сундук» и «📦 Награда аванпоста»
+    if st.get("last_all_poll"):
+        all_line = (f"🎁 Сундуки/аванпосты (раз в {st['all_interval']} с): "
+                    f"{int(time.time() - st['last_all_poll'])} с назад · HTTP {st['last_all_status']}"
+                    f" · нашёл {st['last_all_found']}, новых {st['last_all_added']}")
+        lines.append(all_line)
+    elif st.get("native"):
+        lines.append(f"🎁 Сундуки/аванпосты (раз в {st['all_interval']} с): ещё не опрашивал")
+    if st.get("last_all_error"):
+        lines.append("⚠️ Сундуки/аванпосты, ошибка: " + html.escape(st["last_all_error"]))
+    if st["last_error"]:
+        lines.append("Сеть: " + html.escape(st["last_error"]))
+    # Страница таймеров: адрес подскажем прямо в /апи (открывается в браузере
+    # на устройстве с ботом; порт может отличаться, если 8080 был занят)
+    if not config.WEBAPP_ENABLED:
+        lines.append("🌐 Страница таймеров: выключена (WEBAPP_ENABLED=false в .env)")
+    else:
+        lines.append("🌐 Страница таймеров: " + webapp_server.local_url()
+                     + " — открыть в браузере этого устройства (или /app)")
+    lines.append("")
+    if st.get("native"):
+        lines.append("Ключ продлевается автоматически. Если сервер перестанет "
+                     "принимать initData — свежую добудет юзербот (если вы "
+                     "запускали <code>login_bot.bat</code>) или напишу, что нужно.")
+    else:
+        lines.append("Когда подписи устареют — положите свежий fomo.txt в папку "
+                     "бота, обновлюсь сам и напишу в личку. А чтобы это делалось "
+                     "без вас — запустите <code>login_bot.bat</code> один раз.")
+    return "\n".join(lines)
+
+
+def trace_on_text():
+    return (
+        "🧪 <b>Трассировка включена.</b>\n\n"
+        "Теперь каждый ответ API игры пишется в файл "
+        "<code>data/trace.log</code> (папка бота): все ключи, поля с датами "
+        "и полный JSON. Пришлите <code>/трейслог</code> через пару минут "
+        "(лучше после запуска улучшения в игре) — заберёте файл, по нему "
+        "добавляются переводы новых таймеров.\n"
+        "Выключить: <code>/трассировка</code> ещё раз."
     )
 
 
@@ -227,10 +467,9 @@ def help_text():
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     db.upsert_user(message.from_user.id, config.DEFAULT_TZ)
-    _viewer[0] = message.from_user.id
     _PENDING_CUSTOM.discard(message.from_user.id)
     _PENDING_TZ.discard(message.from_user.id)
-    await message.answer(MENU_TEXT, reply_markup=kb_main())
+    await message.answer(menu_text(), reply_markup=kb_main(message.from_user.id))
 
 
 @router.message(Command("help"))
@@ -247,7 +486,7 @@ async def cmd_t(message: Message, command: CommandObject):
             "Форматы: мм:сс, чч:мм:сс, 1ч 30м, 45м, 30с, 90 (минут)."
         )
         return
-    create_timer_reply(message, message.from_user.id, message.chat.id, label, sec)
+    await create_timer_reply(message, message.from_user.id, message.chat.id, label, sec)
 
 
 @router.message(Command("timers", "list"))
@@ -267,8 +506,55 @@ async def cmd_tz(message: Message):
 @router.message(Command("menu"))
 async def cmd_menu(message: Message):
     db.upsert_user(message.from_user.id, config.DEFAULT_TZ)
-    _viewer[0] = message.from_user.id
-    await message.answer(MENU_TEXT, reply_markup=kb_main())
+    await message.answer(menu_text(), reply_markup=kb_main(message.from_user.id))
+
+
+@router.message(Command("ask"))
+async def cmd_ask(message: Message):
+    """Переключить режим подтверждения (Да/Нет ↔ молча), с записью в .env."""
+    new = not bool(config.API_ASK_BEFORE_ADD)
+    config.set_ask_before_add(new)
+    if new:
+        await message.answer("🔔 Буду <b>показывать новые таймеры списком</b> и добавлю "
+                             "после вашего «Да». Экран: /апи")
+    else:
+        await message.answer("⚡️ Режим: <b>добавляю таймеры молча</b>, без вопросов. "
+                             "Список: /таймеры · Экран: /апи")
+
+
+@router.message(Command("trace"))
+async def cmd_trace(message: Message):
+    """Вкл/выкл трассировку сырых ответов API (data/trace.log)."""
+    new = not trace_mod.enabled()
+    config.set_trace(new)
+    if new:
+        await message.answer(trace_on_text())
+    else:
+        await message.answer("🧪 Трассировка выключена. Лог остался в "
+                             "<code>data/trace.log</code> — забрать: /трейслог")
+
+
+@router.message(Command("tracelog"))
+async def cmd_tracelog(message: Message):
+    """Прислать файл trace.log (по нему добавляются новые таймеры/переводы)."""
+    p = trace_mod.LOG_PATH
+    if not p.exists() or p.stat().st_size == 0:
+        await message.answer(
+            "Лог трассировки пока пуст.\n"
+            "Включите <code>/трассировка</code>, запустите в игре улучшение "
+            "(или откройте клановый сундук / заберите награду аванпоста), "
+            "подождите пару минут и пришлите <code>/трейслог</code> снова."
+        )
+        return
+    try:
+        await message.answer_document(
+            FSInputFile(p),
+            caption="🧪 Лог трассировки. Пришлите его разработчику/в чат — по "
+                    "ключам из этого файла добавляются переводы таймеров.")
+    except Exception as e:
+        log.warning("Не удалось отправить trace.log: %s", e)
+        await message.answer(f"Не удалось отправить файл: {e}\n"
+                             f"Он лежит в папке бота: <code>{p}</code>")
 
 
 # Кириллические алиасы (в официальном меню команд ТГ кириллицу не вставить)
@@ -283,7 +569,7 @@ async def cmd_t_cyr(message: Message):
             "Форматы: мм:сс, чч:мм:сс, 1ч 30м, 45м, 30с, 90 (минут)."
         )
         return
-    create_timer_reply(message, message.from_user.id, message.chat.id, label, sec)
+    await create_timer_reply(message, message.from_user.id, message.chat.id, label, sec)
 
 
 @router.message(F.text.regexp(r"^/(таймеры|список)(@\w+)?$"))
@@ -301,6 +587,50 @@ async def cmd_help_cyr(message: Message):
     await cmd_help(message)
 
 
+@router.message(F.text.regexp(r"^/(апи|автотрекинг)(@\w+)?$"))
+async def cmd_api_cyr(message: Message):
+    await message.answer(api_status_text(), reply_markup=kb_api())
+
+
+@router.message(Command("refresh", "обновить"))
+async def cmd_refresh(message: Message):
+    """Разбудить опросы из тихого режима и обновить таймеры прямо сейчас."""
+    was_quiet = bool(api_poller.status().get("quiet"))
+    api_poller.request_wake("команда /обновить")
+    await message.answer("🔄 Обновляю таймеры…")
+    try:
+        await api_poller.poll_once(message.bot)
+    except Exception:
+        log.exception("/обновить: опрос не удался")
+    quiet_now = bool(api_poller.status().get("quiet"))
+    if quiet_now:
+        await message.answer(
+            "🌙 Таймеры без изменений — остаюсь в тихом режиме (опросы спят).\n"
+            "Напоминания работают: поставленные таймеры и отложенные пуши "
+            "на серверах Telegram никуда не денутся.")
+    else:
+        st = api_poller.status()
+        extra = " Опросы вернулись в обычный ритм." if was_quiet else ""
+        await message.answer(
+            f"✅ Обновлено. Авто-таймеров сейчас: {st['added_total']} "
+            f"(всего добавлено за всё время).{extra}")
+
+
+@router.message(F.text.regexp(r"^/(вопросы|подтверждение|ask)(@\w+)?$"))
+async def cmd_ask_cyr(message: Message):
+    await cmd_ask(message)
+
+
+@router.message(F.text.regexp(r"^/(трассировка|trace)(@\w+)?$"))
+async def cmd_trace_cyr(message: Message):
+    await cmd_trace(message)
+
+
+@router.message(F.text.regexp(r"^/(трейслог|tracelog)(@\w+)?$"))
+async def cmd_tracelog_cyr(message: Message):
+    await cmd_tracelog(message)
+
+
 # ---------- Callbacks ----------
 
 @router.callback_query(F.data == "noop")
@@ -311,19 +641,22 @@ async def cb_noop(cb: CallbackQuery):
 @router.callback_query(F.data == "menu")
 async def cb_menu(cb: CallbackQuery):
     db.upsert_user(cb.from_user.id, config.DEFAULT_TZ)
-    _viewer[0] = cb.from_user.id
     _PENDING_CUSTOM.discard(cb.from_user.id)
     _PENDING_TZ.discard(cb.from_user.id)
-    await edit(cb, MENU_TEXT, kb_main())
+    await edit(cb, menu_text(), kb_main(cb.from_user.id))
     await cb.answer()
 
 
 @router.callback_query(F.data.startswith("q:"))
 async def cb_quick(cb: CallbackQuery):
-    sec = int(cb.data.split(":")[1])
+    try:
+        sec = int(cb.data.split(":")[1])
+    except (IndexError, ValueError):
+        await cb.answer("Не понял длительность")
+        return
     if cb.message is not None:
-        create_timer_reply(cb.message, cb.from_user.id, cb.message.chat.id,
-                           f"Таймер {dur_label(sec)}", sec)
+        await create_timer_reply(cb.message, cb.from_user.id, cb.message.chat.id,
+                                 f"Таймер {dur_label(sec)}", sec)
     await cb.answer()
 
 
@@ -347,8 +680,16 @@ async def cb_list(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("cancel:"))
 async def cb_cancel(cb: CallbackQuery):
-    tid = int(cb.data.split(":")[1])
+    try:
+        tid = int(cb.data.split(":")[1])
+    except (IndexError, ValueError):
+        await cb.answer("Не понял таймер")
+        return
+    row = db.get_timer(tid)
     ok = db.cancel(cb.from_user.id, tid)
+    if ok and row:
+        # снять и запланированный на серверах дубль (фон, не тормозим ответ)
+        asyncio.create_task(sched_push.cancel_for(row["label"]))
     text, kb = render_list(cb.from_user.id)
     await edit(cb, text, kb)
     await cb.answer("🗑 Отменено" if ok else "Уже неактуально")
@@ -356,7 +697,6 @@ async def cb_cancel(cb: CallbackQuery):
 
 @router.callback_query(F.data == "tz")
 async def cb_tz(cb: CallbackQuery):
-    _viewer[0] = cb.from_user.id
     await edit(cb, f"🌍 <b>Часовой пояс</b>\nТекущий: <code>{user_tz(cb.from_user.id).key}</code>",
                kb_tz())
     await cb.answer()
@@ -371,15 +711,204 @@ async def cb_tz_set(cb: CallbackQuery):
         await cb.answer()
         return
     db.set_tz(cb.from_user.id, name)
-    _viewer[0] = cb.from_user.id
-    await edit(cb, MENU_TEXT, kb_main())
+    await edit(cb, menu_text(), kb_main(cb.from_user.id))
     await cb.answer("Сохранено")
+
+
+@router.callback_query(F.data.startswith("tadd:"))
+async def cb_auto_add(cb: CallbackQuery):
+    """«Да»: поставить все таймеры из предложенной партии."""
+    try:
+        gid = int(cb.data.split(":", 1)[1])
+    except (IndexError, ValueError):
+        gid = -1
+    n, added = api_poller.confirm_group(gid)
+    if n:
+        tz = user_tz(cb.from_user.id)
+        lines = [f"✅ <b>Добавлено таймеров: {n}</b>", ""]
+        for up in added:
+            lines.append(f"• {html.escape(up['label'])} → {local_str(up['ends_at'], tz)}")
+        lines.append("")
+        lines.append("🔔 В момент финиша пришлю «Готово». Список: /таймеры")
+        await edit(cb, "\n".join(lines), kb_back_menu())
+        await cb.answer("Добавлено")
+    else:
+        await edit(cb, "👌 Это предложение уже обработано или устарело.", kb_back_menu())
+        await cb.answer("Уже неактуально")
+
+
+@router.callback_query(F.data.startswith("tdeny:"))
+async def cb_auto_deny(cb: CallbackQuery):
+    """«Нет»: не ставить и не предлагать эти таймеры снова."""
+    try:
+        gid = int(cb.data.split(":", 1)[1])
+    except (IndexError, ValueError):
+        gid = -1
+    api_poller.decline_group(gid)
+    await edit(cb, "👌 Хорошо, эти не ставлю. Продолжаю следить: заметлю новые "
+                   "улучшения — покажу отдельным вопросом.", kb_back_menu())
+    await cb.answer("Ок")
+
+
+@router.callback_query(F.data == "ask")
+async def cb_ask_toggle(cb: CallbackQuery):
+    """Кнопка на экране /апи: вкл/выкл подтверждение Да/Нет (сохраняется в .env)."""
+    new = not bool(config.API_ASK_BEFORE_ADD)
+    config.set_ask_before_add(new)
+    await edit(cb, api_status_text(), kb_api())
+    await cb.answer("Буду спрашивать подтверждение" if new else "Добавляю молча")
+
+
+@router.callback_query(F.data == "trace")
+async def cb_trace_toggle(cb: CallbackQuery):
+    """Кнопка на экране /апи: вкл/выкл трассировку (сохраняется в .env)."""
+    new = not trace_mod.enabled()
+    config.set_trace(new)
+    await edit(cb, api_status_text(), kb_api())
+    await cb.answer("Трассировка включена (/трейслог)" if new else "Трассировка выключена")
 
 
 @router.callback_query(F.data == "help")
 async def cb_help(cb: CallbackQuery):
     await edit(cb, help_text(), kb_back_menu())
     await cb.answer()
+
+
+# ---------- Ночной режим (подменю экрана /апи, скрытность) ----------
+
+def night_text():
+    """Экран «🌙 Ночной режим»: окно сна, тишина, микротики."""
+    st = api_poller.status()
+    n = st.get("night") or {}
+    mode = st.get("mode")
+    if n.get("is_night"):
+        state = "💤 сейчас идёт ночное окно — игровых запросов нет"
+    elif mode == "quiet":
+        state = "🌙 тихий режим — автопульс раз в 30–55 мин"
+    else:
+        state = "▶️ активное слежение"
+    return (
+        "🌙 <b>Ночной режим</b> (скрытность + батарея)\n\n"
+        f"Окно сна: <b>{n.get('start', '00:00')} → {n.get('end', '08:00')}</b> "
+        f"({html.escape(str(n.get('tz', '—')))})\n"
+        f"Тишина ночью: <b>{'ВКЛ — ноль запросов к игре' if n.get('silent') else 'выкл — ночью живёт автопульс'}</b>\n"
+        f"Микротики: <b>{'ВКЛ — 1–2 проверки за ночь' if n.get('microticks') else 'выкл'}</b>\n"
+        f"Сейчас: {state}\n\n"
+        "Люди ночью спят — и бот спит. Окно двигается кнопками ±30 минут, "
+        "хранится в базе и переживает рестарт. Утро начинается не ровно по "
+        "часам, а со случайным сдвигом (до 15 минут).\n\n"
+        "Напоминания ночью ПРИХОДЯТ как обычно: поставленные таймеры пушит "
+        "планировщик, а отложенные пуши живут на серверах Telegram."
+    )
+
+
+def kb_night():
+    st = api_poller.status()
+    n = st.get("night") or {}
+    rows = [
+        [InlineKeyboardButton(text="◀️ 30м", callback_data="nhs-"),
+         InlineKeyboardButton(text=f"🌙 {n.get('start', '00:00')}", callback_data="noop"),
+         InlineKeyboardButton(text="30м ▶️", callback_data="nhs+")],
+        [InlineKeyboardButton(text="◀️ 30м", callback_data="nhe-"),
+         InlineKeyboardButton(text=f"☀️ {n.get('end', '08:00')}", callback_data="noop"),
+         InlineKeyboardButton(text="30м ▶️", callback_data="nhe+")],
+        [InlineKeyboardButton(
+             text="💤 Тишина: " + ("ВКЛ" if n.get("silent") else "выкл"),
+             callback_data="nsil"),
+         InlineKeyboardButton(
+             text="🔬 Микротики: " + ("ВКЛ" if n.get("microticks") else "выкл"),
+             callback_data="nmic")],
+        [InlineKeyboardButton(text="↩️ Сбросить к дефолту", callback_data="nreset")],
+        [InlineKeyboardButton(text="⬅️ К автотрекингу", callback_data="api")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data == "api")
+async def cb_api_screen(cb: CallbackQuery):
+    """Назад из ночного подменю на экран /апи."""
+    await edit(cb, api_status_text(), kb_api())
+    await cb.answer()
+
+
+@router.callback_query(F.data == "night")
+async def cb_night(cb: CallbackQuery):
+    await edit(cb, night_text(), kb_night())
+    await cb.answer()
+
+
+@router.callback_query(F.data.in_({"nhs-", "nhs+", "nhe-", "nhe+",
+                                   "nsil", "nmic", "nreset"}))
+async def cb_night_edit(cb: CallbackQuery):
+    data = cb.data
+    st = pollbrain.settings()
+    if data in ("nhs-", "nhs+", "nhe-", "nhe+"):
+        key = "night_start" if data.startswith("nhs") else "night_end"
+        cur = pollbrain.parse_hhmm(st[key]) or (0, 0)
+        mins = (cur[0] * 60 + cur[1] + (30 if data.endswith("+") else -30)) % 1440
+        pollbrain.set_night(key, f"{mins // 60:02d}:{mins % 60:02d}")
+    elif data == "nsil":
+        pollbrain.set_night("night_silent", not st["night_silent"])
+    elif data == "nmic":
+        pollbrain.set_night("night_microticks", not st["night_microticks"])
+    elif data == "nreset":
+        pollbrain.reset_night()
+    await edit(cb, night_text(), kb_night())
+    await cb.answer("Готово")
+
+
+# ---------- Пауза (кнопка в меню и /пауза) ----------
+
+@router.callback_query(F.data == "pause")
+async def cb_pause(cb: CallbackQuery):
+    db.upsert_user(cb.from_user.id, config.DEFAULT_TZ)
+    was = pause_state.is_paused()
+    snap = pause_state.set_paused(not was)
+    log.info("Пауза %s (владелец)", "снята" if was else "включена")
+    if was:
+        asyncio.create_task(sched_push.reschedule_unfinished())
+    else:
+        asyncio.create_task(sched_push.cancel_all())
+    await edit(cb, menu_text(), kb_main(cb.from_user.id))
+    if was:
+        await cb.answer("▶️ Пуши снова работают")
+        missed = pause_state.take_missed()
+        if missed and cb.message is not None:
+            try:
+                await cb.message.answer(
+                    resume_summary_text(missed, snap.get("paused_at")))
+            except Exception:
+                log.exception("Не удалось отправить сводку после паузы")
+    else:
+        await cb.answer("⏸ Пуши остановлены — пока не нажмёте «Продолжить»")
+
+
+@router.message(Command("pause", "пауза"))
+async def cmd_pause(message: Message):
+    """Пауза/продолжить: то же, что кнопка в меню."""
+    db.upsert_user(message.from_user.id, config.DEFAULT_TZ)
+    was = pause_state.is_paused()
+    snap = pause_state.set_paused(not was)
+    log.info("Пауза %s (команда)", "снята" if was else "включена")
+    if was:
+        asyncio.create_task(sched_push.reschedule_unfinished())
+    else:
+        asyncio.create_task(sched_push.cancel_all())
+    if not was:
+        await message.answer(
+            "⏸ <b>Бот поставлен на паузу.</b>\n\n"
+            "Пуши («Готово ✅», предупреждения, предложения Да/Нет) больше "
+            "не приходят, пока не нажмёте ▶️ <b>Продолжить</b> в меню или "
+            "не пришлёте <code>/пауза</code> ещё раз.\n\n"
+            "Таймеры продолжают ставиться, автотрекинг работает, всё "
+            "завершённое придёт одной сводкой после возобновления.",
+            reply_markup=kb_main(message.from_user.id),
+        )
+        return
+    await message.answer(menu_text(), reply_markup=kb_main(message.from_user.id))
+    missed = pause_state.take_missed()
+    if missed:
+        await message.answer(resume_summary_text(missed, snap.get("paused_at")))
 
 
 # ---------- Ввод текстом (должны быть ПОСЛЕДними — ловят любой текст) ----------
@@ -395,7 +924,7 @@ async def on_pending_custom(message: Message):
         )
         _PENDING_CUSTOM.add(message.from_user.id)  # даём ещё попытку
         return
-    create_timer_reply(message, message.from_user.id, message.chat.id, label, sec)
+    await create_timer_reply(message, message.from_user.id, message.chat.id, label, sec)
 
 
 @router.message(lambda m: m.from_user is not None and m.from_user.id in _PENDING_TZ)
@@ -403,6 +932,5 @@ async def on_pending_tz(message: Message):
     _PENDING_TZ.discard(message.from_user.id)
     tz = safe_tz((message.text or "").strip())
     db.set_tz(message.from_user.id, tz.key)
-    _viewer[0] = message.from_user.id
     await message.answer(f"🌍 Часовой пояс: <code>{tz.key}</code>.",
-                         reply_markup=kb_main())
+                         reply_markup=kb_main(message.from_user.id))
