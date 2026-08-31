@@ -28,6 +28,7 @@ import config
 import db
 import pause_state
 import sched_push
+import termux_notify
 import util
 import webapp_prefs
 
@@ -92,12 +93,20 @@ def done_text(row, tz):
     return text
 
 
-async def _send(bot, chat_id, text) -> bool:
-    """Доставить сообщение. False = сеть/сервис недоступны, стоит повторить.
+async def _send(bot, chat_id, text, notif_id=None) -> bool:
+    """Доставить напоминание. False = стоит повторить в ближайших тиках.
 
     Исключение составляют «перманентные» отказы (пользователь заблокировал
     бота): повторять бессмысленно — считаем доставленным.
+
+    Termux-режим (TERMUX_NOTIFY=true в .env, тумблер ⚙️ на странице):
+    напоминание НЕ пишется в Telegram — вместо этого termux-notification
+    показывает карточку в шторке Android. False оттуда (нет Termux:API,
+    команда упала) — повторяем, как при сетевом сбое. Всё остальное — пауза,
+    тихий режим групп, ретраи — работает выше по коду без изменений.
     """
+    if config.termux_notify_enabled():
+        return await termux_notify.send(text, notif_id)
     try:
         await bot.send_message(chat_id, text)
         return True
@@ -124,21 +133,34 @@ async def tick(bot, now=None):
     paused = pause_state.is_paused()
 
     for row in db.due_done(now):
+        # 0.1.1.8: липкий сундук («ждёт забора») после пуша НЕ закрывается —
+        # карточка живёт на странице, пока игра не покажет, что награда забрана.
+        sticky = bool(row["sticky"])
         if paused:
-            db.mark_done(row["id"])
+            if sticky:
+                db.mark_sticky_pushed(row["id"])
+            else:
+                db.mark_done(row["id"])
             pause_state.record_missed(row["label"], row["ends_at"])
             await sched_push.cancel_for(row["label"])  # запланированный дубль снимаем
             continue
         if webapp_prefs.is_muted(row["bucket"]):
-            db.mark_done(row["id"])   # тихий режим: без пуша, но и без догонялок
+            if sticky:
+                db.mark_sticky_pushed(row["id"])   # пуша нет, карточка остаётся
+            else:
+                db.mark_done(row["id"])   # тихий режим: без пуша, но и без догонялок
             await sched_push.cancel_for(row["label"])
             continue
         user = db.get_user(row["tg_id"])
         tz = util.safe_tz(user["tz"] if user else None)
         if not _can_retry(row["id"], now):
             continue
-        if await _send(bot, row["chat_id"], done_text(row, tz)):
-            db.mark_done(row["id"])
+        if await _send(bot, row["chat_id"], done_text(row, tz),
+                       notif_id=row["bucket"] or "manual"):
+            if sticky:
+                db.mark_sticky_pushed(row["id"])
+            else:
+                db.mark_done(row["id"])
             _retry_done(row["id"])
             # Свой пуш доставлен — запланированный на серверах дубль больше не нужен.
             # (Если доставить не удалось, запланированное СОХРАНЯЕМ: оно и есть страховка.)
@@ -152,7 +174,10 @@ async def tick(bot, now=None):
                     pass
         elif now - row["ends_at"] > DONE_RETRY_SEC:
             # сеть лежит слишком долго — закрываем, чтобы не копить хвост
-            db.mark_done(row["id"])
+            if sticky:
+                db.mark_sticky_pushed(row["id"])
+            else:
+                db.mark_done(row["id"])
             _retry_done(row["id"])
             log.warning("Пуш %r не доставлен за %s с — закрываю без уведомления",
                         row["label"], DONE_RETRY_SEC)
@@ -169,7 +194,8 @@ async def tick(bot, now=None):
         tz = util.safe_tz(user["tz"] if user else None)
         if not _can_retry("p%s" % row["id"], now):
             continue
-        if await _send(bot, row["chat_id"], prewarn_text(row, tz)):
+        if await _send(bot, row["chat_id"], prewarn_text(row, tz),
+                       notif_id=row["bucket"] or "manual"):
             db.mark_prewarn(row["id"])
             _retry_done("p%s" % row["id"])
         elif now - row["ends_at"] > PREWARN_RETRY_SEC:
@@ -189,7 +215,8 @@ async def tick(bot, now=None):
             tz = util.safe_tz(user["tz"] if user else None)
             if not _can_retry("w%s" % row["id"], now):
                 continue
-            if await _send(bot, row["chat_id"], warn_text(row, tz)):
+            if await _send(bot, row["chat_id"], warn_text(row, tz),
+                           notif_id=row["bucket"] or "manual"):
                 db.mark_warn(row["id"])
                 _retry_done("w%s" % row["id"])
             elif now - row["ends_at"] > WARN_RETRY_SEC:

@@ -31,7 +31,10 @@ CREATE TABLE IF NOT EXISTS timers(
     warn_sent  INTEGER NOT NULL DEFAULT 0,
     done_sent  INTEGER NOT NULL DEFAULT 0,
     bucket     TEXT NOT NULL DEFAULT '',
-    prenote_sent INTEGER NOT NULL DEFAULT 0
+    prenote_sent INTEGER NOT NULL DEFAULT 0,
+    sticky     INTEGER NOT NULL DEFAULT 0,
+    ready_key  TEXT NOT NULL DEFAULT '',
+    pushed     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_timers_due ON timers(done_sent, ends_at);
 CREATE INDEX IF NOT EXISTS idx_timers_prewarn ON timers(done_sent, prenote_sent, bucket);
@@ -46,6 +49,11 @@ CREATE TABLE IF NOT EXISTS settings(
 _MIGRATE_COLUMNS = [
     ("timers", "bucket", "TEXT NOT NULL DEFAULT ''"),
     ("timers", "prenote_sent", "INTEGER NOT NULL DEFAULT 0"),
+    # 0.1.1.8: «липкие» сундуки — пуш уходит один раз, карточка висит на
+    # странице до момента забора (sticky=1, done_sent=0, pushed=1).
+    ("timers", "sticky", "INTEGER NOT NULL DEFAULT 0"),
+    ("timers", "ready_key", "TEXT NOT NULL DEFAULT ''"),
+    ("timers", "pushed", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 # Осадные таймеры, поставленные до появления bucket: опознаём по метке
@@ -171,14 +179,16 @@ def all_settings():
 
 # ---------- Таймеры ----------
 
-def add_timer(tg_id, chat_id, label, ends_at, created_at=None, bucket=""):
+def add_timer(tg_id, chat_id, label, ends_at, created_at=None, bucket="",
+              sticky=False, ready_key=""):
+    """sticky=True — сундук «ждёт забора»: пуш один раз, карточка живёт до сбора."""
     with _LOCK:
         cur = _db().execute(
-            "INSERT INTO timers(tg_id, chat_id, label, ends_at, created_at, bucket) "
-            "VALUES(?, ?, ?, ?, ?, ?)",
+            "INSERT INTO timers(tg_id, chat_id, label, ends_at, created_at, bucket, "
+            "sticky, ready_key) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
             (tg_id, chat_id, label, ends_at,
              created_at if created_at is not None else time.time(),
-             bucket or ""),
+             bucket or "", 1 if sticky else 0, ready_key or ""),
         )
         _db().commit()
         return cur.lastrowid
@@ -240,10 +250,38 @@ def due_prewarn(now):
 
 
 def due_done(now):
-    """Таймеры, время которых вышло (в т.ч. просроченные после офлайна бота)."""
+    """Таймеры, время которых вышло (в т.ч. просроченные после офлайна бота).
+
+    Липкие сундуки (pushed=1) сюда не попадают: их пуш уже ушёл, карточка
+    продолжает жить в active() до момента забора.
+    """
     with _LOCK:
         return _db().execute(
-            "SELECT * FROM timers WHERE done_sent=0 AND ends_at <= ?", (now,)
+            "SELECT * FROM timers WHERE done_sent=0 AND pushed=0 AND ends_at <= ?",
+            (now,)
+        ).fetchall()
+
+
+def mark_sticky_pushed(timer_id):
+    """Пуш липкого сундука ушёл (или заглушен/пауза): НЕ закрывать таймер.
+
+    done_sent остаётся 0 — карточка видна на странице; остальные флаги
+    подняты, чтобы due_done/due_warn/due_prewarn больше его не тревожили.
+    """
+    with _LOCK:
+        _db().execute(
+            "UPDATE timers SET pushed=1, warn_sent=1, prenote_sent=1 WHERE id=?",
+            (timer_id,),
+        )
+        _db().commit()
+
+
+def sticky_rows(tg_id):
+    """Активные липкие сундуки владельца (для сверки с ответом игры)."""
+    with _LOCK:
+        return _db().execute(
+            "SELECT * FROM timers WHERE tg_id=? AND done_sent=0 AND sticky=1",
+            (tg_id,),
         ).fetchall()
 
 

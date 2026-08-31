@@ -36,6 +36,14 @@
   .hrow{display:flex; align-items:baseline; gap:8px}
   .hrow h1{font-size:19px; margin:0; font-weight:700; letter-spacing:.2px}
   .hrow .ver{color:var(--hint); font-size:12px; margin-left:auto}
+  .gear{
+    border:none; background:var(--card); color:var(--text);
+    width:34px; height:30px; border-radius:9px; font-size:15px; cursor:pointer;
+    display:flex; align-items:center; justify-content:center; flex:none;
+    align-self:center;
+  }
+  .gear:active{opacity:.7}
+  #tbadge{color:var(--hint); font-size:12px}
   .hstatus{margin-top:3px; font-size:12.5px; color:var(--hint); display:flex; align-items:center; gap:6px}
   .dot{width:8px; height:8px; border-radius:50%; background:var(--ok); display:inline-block; flex:none}
   .dot.warn{background:var(--warn)} .dot.err{background:var(--danger)}
@@ -121,10 +129,11 @@
     padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
     display:flex; gap:8px;
   }
-  #bar button{
+  #bar button, #bar a{
     flex:1; border:none; border-radius:12px; padding:12px 6px;
     font-size:14.5px; font-weight:600; cursor:pointer;
     background:var(--card); color:var(--text);
+    text-decoration:none; display:flex; align-items:center; justify-content:center;
   }
   #bar button.primary{background:var(--btn); color:var(--btntext)}
   #bar button.primary.busy{opacity:.65}
@@ -143,6 +152,38 @@
   }
   .spin{display:inline-block; animation: spin 1s linear infinite}
   @keyframes spin{to{transform:rotate(360deg)}}
+  /* ---- Кнопка ⚙️: настройки бота — Termux-режим + редактор .env (0.1.1.9) */
+  #modal{
+    display:none; position:fixed; inset:0; z-index:40;
+    background:rgba(0,0,0,.62); padding:5vh 12px 16px; overflow:auto;
+  }
+  #modal .mbox{
+    max-width:560px; margin:0 auto; background:var(--sec);
+    border:1px solid var(--line); border-radius:16px; padding:14px 14px 12px;
+  }
+  #modal .mhead{display:flex; align-items:center; gap:8px; margin-bottom:10px}
+  #modal .mhead b{font-size:16px}
+  #modal .mhead button{
+    margin-left:auto; border:none; background:var(--card); color:var(--text);
+    width:30px; height:28px; border-radius:8px; cursor:pointer; font-size:14px;
+  }
+  #modal .mrow{display:flex; align-items:center; gap:8px; margin:6px 0}
+  #modal .mlab{font-size:14px; flex:1}
+  #modal .mhint{font-size:11.5px; color:var(--hint); margin:4px 0 8px}
+  #modal textarea{
+    width:100%; height:42vh; min-height:220px; resize:vertical;
+    background:var(--card); color:var(--text); border:1px solid var(--line);
+    border-radius:10px; padding:10px;
+    font:12.5px/1.5 "SF Mono", ui-monospace, Consolas, Menlo, monospace;
+    white-space:pre; overflow:auto;
+  }
+  #modal .mbtns{display:flex; gap:8px; margin-top:10px}
+  #modal .mbtns button{
+    flex:1; border:none; border-radius:10px; padding:11px 8px;
+    font-size:14px; font-weight:600; cursor:pointer;
+    background:var(--card); color:var(--text);
+  }
+  #modal .mbtns button.primary{background:var(--btn); color:var(--btntext)}
 </style>
 </head>
 <body>
@@ -150,10 +191,12 @@
   <div class="hrow">
     <h1>🎯 FOMO Таймеры</h1>
     <span class="ver" id="ver"></span>
+    <button class="gear" id="btnSettings" title="Настройки бота (.env)">⚙️</button>
   </div>
   <div class="hstatus">
     <span class="dot" id="dot"></span>
     <span id="status">подключаюсь…</span>
+    <span id="tbadge" style="display:none">· 📲 Termux</span>
   </div>
 </header>
 
@@ -161,9 +204,35 @@
 <main id="main"></main>
 
 <div id="bar">
-  <button id="btnGame">🎮 Игра</button>
+  <!-- 0.1.1.7: настоящая <a>-ссылка вместо button+скриптового открытия окна --
+       попап-блокировщики и встроенные браузеры молча гасили программное
+       открытие окон, из-за чего кнопка «не работала». Прямая ссылка с
+       target=_blank открывается всегда. -->
+  <a id="btnGame" href="#" target="_blank" rel="noopener">🎮 Игра</a>
   <button id="btnRefresh" class="primary">🔄 Обновить</button>
   <button id="btnMute">🔕 Тихий режим</button>
+</div>
+<!-- 0.1.1.9: настройки бота — Termux-режим и редактор локального .env.
+     Сервер слушает только 127.0.0.1, так что правка .env из браузера
+     безопасна: страницу видит только владелец на этом же устройстве. -->
+<div id="modal">
+  <div class="mbox">
+    <div class="mhead"><b>⚙️ Настройки бота</b><button id="mClose" title="Закрыть">✕</button></div>
+    <div class="mrow">
+      <span class="mlab">📲 Termux-режим уведомлений</span>
+      <button class="nbtn" id="mTermux">📲 выкл</button>
+    </div>
+    <div class="mhint" id="mTermuxHint"></div>
+    <div class="mhint">Файл .env — те же настройки, что заполнялись при установке.
+      Сохранение делает бэкап .env.bak:</div>
+    <textarea id="envText" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+    <div class="mbtns">
+      <button id="mSave" class="primary">💾 Сохранить .env</button>
+      <button id="mCancel">Закрыть</button>
+    </div>
+    <div class="mhint">BOT_TOKEN, WEBAPP_PORT, DB_PATH применяются после рестарта
+      бота; тумблеры, ночной режим, интервалы опроса — сразу.</div>
+  </div>
 </div>
 <div id="toast"></div>
 
@@ -266,6 +335,9 @@
   function render(){
     if (!STATE) return;
     $("ver").textContent = "v" + STATE.version;
+    var app = STATE.app || {};
+    var tb = $("tbadge");
+    if (tb) tb.style.display = app.termux ? "" : "none";
     var st = STATE.api || {};
     var stTxt, stKind = "ok";
     if (STATE.paused) { stTxt = "⏸ бот на паузе — пуши не приходят"; stKind = "warn"; }
@@ -277,15 +349,15 @@
 
     var main = $("main");
     main.innerHTML = "";
-    main.appendChild(nightBlock());
 
     if (!STATE.timers.length) {
       main.appendChild(emptyBlock());
+      main.appendChild(nightBlock()); // 0.1.1.7: настройки ночи — внизу страницы
       renderBar();
       return;
     }
 
-    // группы в порядке сервера (как в translations.BUCKETS)
+    // группы в порядке сервера (0.1.1.7: тренировка -> стройка -> остальное)
     STATE.groups.forEach(function(g){
       var sec = document.createElement("section");
       sec.className = "group";
@@ -307,6 +379,8 @@
       main.appendChild(sec);
     });
 
+    // 0.1.1.7: ночной режим переехал ВНИЗ — таймеры всегда первыми на экране
+    main.appendChild(nightBlock());
     renderBar();
   }
 
@@ -344,8 +418,14 @@
     var left = t.ends_at - now;
     if (left <= 0) {
       el.classList.add("done");
-      cd.childNodes[0].nodeValue = "✅ Готово";
-      small.textContent = "финиш " + finishStr(t.ends_at);
+      if (t.sticky) {
+        // 0.1.1.8: сундук созрел — карточка ждёт сбора, уйдёт сама после него
+        cd.childNodes[0].nodeValue = "🎁 Ждёт забора";
+        small.textContent = "награда созрела — забери её в игре";
+      } else {
+        cd.childNodes[0].nodeValue = "✅ Готово";
+        small.textContent = "финиш " + finishStr(t.ends_at);
+      }
       if (bar) bar.style.width = "100%";
       return;
     }
@@ -541,22 +621,112 @@
     });
   }
 
+  // ---------- Настройки бота (кнопка ⚙️: Termux-режим + .env, 0.1.1.9) ----------
+
+  var ENV_STATE = { termux: false, termux_bin: false };
+
+  function renderTermux(){
+    var b = $("mTermux");
+    b.textContent = ENV_STATE.termux ? "📲 ВКЛ" : "📲 выкл";
+    b.className = "nbtn" + (ENV_STATE.termux ? " on" : "");
+    var h = $("mTermuxHint");
+    if (ENV_STATE.termux && !ENV_STATE.termux_bin) {
+      h.textContent = "⚠️ termux-notification не найден: поставьте приложение "
+        + "Termux:API (F-Droid) и выполните в Termux: pkg install termux-api — "
+        + "пока этого нет, пуши таймеров никуда не приходят";
+    } else if (ENV_STATE.termux) {
+      h.textContent = "Вкл: напоминания таймеров приходят в шторку Android, "
+        + "в Telegram не пишутся, отложенные пуши отключены.";
+    } else {
+      h.textContent = "Выкл: напоминания приходят в Telegram, как раньше.";
+    }
+  }
+
+  function openSettings(){
+    $("modal").style.display = "block";
+    $("envText").value = "загружаю…";
+    api("/api/env", {}, function(code, j){
+      if (j && j.ok) {
+        $("envText").value = j.raw || "";
+        ENV_STATE.termux = !!j.termux;
+        ENV_STATE.termux_bin = !!j.termux_bin;
+        renderTermux();
+      } else {
+        $("envText").value = "";
+        toast((j && j.error) || "не удалось прочитать .env");
+      }
+    });
+  }
+
+  function closeSettings(){
+    $("modal").style.display = "none";
+  }
+
+  function toggleTermux(){
+    var want = !ENV_STATE.termux;
+    post("/api/env", {key: "TERMUX_NOTIFY", value: want ? "true" : "false"},
+      function(j){
+        if (j.ok) {
+          ENV_STATE.termux = want;
+          if (typeof j.termux_bin === "boolean") ENV_STATE.termux_bin = j.termux_bin;
+          renderTermux();
+          if (STATE && STATE.app) {
+            STATE.app.termux = want;
+            STATE.app.termux_bin = ENV_STATE.termux_bin;
+          }
+          var tb = $("tbadge");
+          if (tb) tb.style.display = want ? "" : "none";
+          toast(want ? "📲 Termux-режим включён — пуши в шторку"
+                     : "Termux-режим выключен — пуши в Telegram");
+        } else toast(j.error || "не получилось");
+      });
+  }
+
+  function saveEnv(){
+    var raw = $("envText").value;
+    if (!raw || raw.indexOf("=") < 0) {
+      toast("В тексте нет строк вида КЛЮЧ=ЗНАЧЕНИЕ — не сохраняю");
+      return;
+    }
+    post("/api/env", {raw: raw}, function(j){
+      if (j.ok) {
+        toast("💾 Сохранено" + (j.backup ? " (бэкап .env.bak)" : "")
+            + " — настройки применены");
+        if (typeof j.termux === "boolean") {
+          ENV_STATE.termux = j.termux;
+          if (typeof j.termux_bin === "boolean") ENV_STATE.termux_bin = j.termux_bin;
+          renderTermux();
+          if (STATE && STATE.app) STATE.app.termux = j.termux;
+          var tb = $("tbadge");
+          if (tb) tb.style.display = j.termux ? "" : "none";
+        }
+      } else toast(j.error || "не получилось");
+    });
+  }
+
   function renderBar(){
     var muteBtn = $("btnMute");
     var allMuted = !!(STATE && STATE.settings && STATE.settings.all);
     muteBtn.textContent = allMuted ? "🔕 Пуши выключены" : "🔕 Тихий режим";
     muteBtn.className = "alt" + (allMuted ? " on" : "");
     var game = $("btnGame");
-    game.style.display = (STATE && STATE.app && STATE.app.game_url) ? "" : "none";
+    var gurl = (STATE && STATE.app && STATE.app.game_url) || "";
+    game.style.display = gurl ? "" : "none";
+    if (gurl) game.href = gurl; // 0.1.1.7: href на настоящей ссылке
   }
 
   $("btnRefresh").onclick = refresh;
   $("btnMute").onclick = toggleAll;
-  $("btnGame").onclick = function(){
-    var url = STATE && STATE.app && STATE.app.game_url;
-    if (!url) return;
-    window.open(url, "_blank");
-  };
+  // 0.1.1.7: у «Игры» больше нет onclick с window.open — работаем через href
+  // 0.1.1.9: кнопка ⚙️ — настройки бота поверх страницы
+  $("btnSettings").onclick = openSettings;
+  $("mClose").onclick = closeSettings;
+  $("mCancel").onclick = closeSettings;
+  $("mTermux").onclick = toggleTermux;
+  $("mSave").onclick = saveEnv;
+  document.addEventListener("keydown", function(e){
+    if ((e.key || e.keyCode) === "Escape") closeSettings();
+  });
 
   load();
 })();

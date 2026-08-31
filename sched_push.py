@@ -30,6 +30,11 @@ cancel_*; если у вас есть личные отложенные сооб
 Включение: USERBOT_SCHEDULE=true (по умолчанию включено) и живая сессия
 userbot.session (login_bot.bat). Нет сессии или имени бота — функции тихо
 возвращают неуспех, бот работает как раньше.
+
+Termux-режим (TERMUX_NOTIFY=true, тумблер ⚙️ на странице): отложенные пуши
+НЕ создаются вовсе — available() всегда False. Напоминания идут в шторку
+Android (termux_notify), и «страховка» на серверах Telegram не нужна:
+в чате с ботом не копятся отложенные сообщения.
 """
 import asyncio
 import logging
@@ -61,7 +66,14 @@ def peer_name() -> str | None:
 
 
 def available() -> bool:
-    """Есть ли смысл пробовать: флаг включён и файл сессии на месте."""
+    """Есть ли смысл пробовать: НЕ Termux-режим, флаг включён, сессия на месте.
+
+    Termux-режим (TERMUX_NOTIFY=true в .env) полностью выключает отложенные
+    пуши: напоминания уходят в шторку Android, и дубли в Telegram не нужны.
+    Тумблер читается живо — переключение со страницы действует сразу.
+    """
+    if config.termux_notify_enabled():
+        return False
     if not config.USERBOT_SCHEDULE:
         return False
     return os.path.exists(session_path())

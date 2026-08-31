@@ -24,9 +24,16 @@ API (без заголовков авторизации — доступ тол�
   POST /api/brain    — {"key": "night_start", "value": "23:30"}: ночной режим
                        (night_start/night_end "HH:MM", night_silent/
                        night_microticks true|false, {"reset": true} — дефолты)
+  GET  /api/env      — кнопка ⚙️: содержимое локального .env + статус Termux
+  POST /api/env      — {"raw": "..."} сохранить .env целиком (бэкап .env.bak,
+                       скалярные настройки применяются сразу) или
+                       {"key": "TERMUX_NOTIFY", "value": "true"} — точечно
 """
 import json
 import logging
+import os
+import re
+import shutil
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -35,6 +42,7 @@ from pathlib import Path
 import config
 import db
 import pause_state
+import termux_notify
 import webapp_prefs
 import translations as tr
 
@@ -43,8 +51,14 @@ log = logging.getLogger("webapp")
 ROOT = Path(__file__).resolve().parent
 INDEX_PATH = ROOT / "webapp" / "index.html"
 
-# Максимальный размер тела POST (наши запросы — десятки байт)
-BODY_MAX = 16 * 1024
+# Максимальный размер тела POST. Раньше 16 КБ хватало (запросы — десятки
+# байт); с 0.1.1.9 кнопка ⚙️ шит .env целиком (.env.example ~10 КБ) — 64 КБ.
+BODY_MAX = 64 * 1024
+
+# Имя ключа .env для точечной правки (POST /api/env {"key": ...})
+_ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+# Максимальный размер сохраняемого .env (защита от случайной простыни)
+ENV_MAX = 128 * 1024
 
 # --- Провайдеры, которые bot.py связывает с живым ботом (для тестов — заглушки)
 _LOOP = None            # главный asyncio-цикл бота
@@ -86,10 +100,22 @@ def allowed_user_ids() -> set:
 
 # ---------- Состояние для /api/state ----------
 
+# 0.1.1.7: пользовательская сортировка СТРАНИЦЫ — сначала тренировка войск,
+# потом стройка, дальше как в translations.BUCKETS. Сам BUCKETS не трогаем:
+# его порядок используют подписи и меню бота, здесь важен только экран.
+_WEBAPP_FIRST = ("tTroops", "tBuildings")
+
+
 def _bucket_order():
-    """Порядок групп: как в translations.BUCKETS, неизвестные — в конец."""
+    """Порядок групп на странице: тренировка -> стройка -> остальное.
+
+    Влияет только на /api/state (порядок карточек и групп). Неизвестные
+    бакеты — в конец, как и раньше.
+    """
     known = list(tr.BUCKETS.keys())
-    return {k: i for i, k in enumerate(known)}
+    head = [k for k in _WEBAPP_FIRST if k in known]
+    rest = [k for k in known if k not in head]
+    return {k: i for i, k in enumerate(head + rest)}
 
 
 def build_state(now=None):
@@ -123,6 +149,8 @@ def build_state(now=None):
                 "bucket_title": tr.bucket(b) if b else "⏱ Ручной",
                 "muted": muted,
                 "siege": b == "tOutpostSiegesMine",
+                # 0.1.1.8: липкий сундук — «ждёт забора», карточка до момента сбора
+                "sticky": bool(r["sticky"]) if "sticky" in r.keys() else False,
             }
             timers.append(t)
             # у одной группы один bucket -> muted одинаков у всех членов
@@ -147,7 +175,10 @@ def build_state(now=None):
         "settings": {"all": prefs["all"], "muted": {b: True for b in prefs["buckets"]}},
         "api": st,
         "app": {"refresh": _REFRESH_SUBMIT is not None,
-                "game_url": f"https://t.me/{config.FOMO_GAME_BOT}/{config.FOMO_APP_NAME}"},
+                "game_url": f"https://t.me/{config.FOMO_GAME_BOT}/{config.FOMO_APP_NAME}",
+                # 0.1.1.9: Termux-режим — бейдж в шапке + статус для кнопки ⚙️
+                "termux": config.termux_notify_enabled(),
+                "termux_bin": termux_notify.binary_available()},
     }
 
 
@@ -230,6 +261,9 @@ class Handler(BaseHTTPRequestHandler):
                 log.exception("api/state ошибка")
                 self._fail(500, str(e)[:200])
             return
+        if path == "/api/env":
+            self._api_env_get()
+            return
         self._fail(404, "нет такого пути")
 
     # --- POST ---
@@ -252,6 +286,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/brain":
                 self._api_brain(data)
+                return
+            if path == "/api/env":
+                self._api_env_save(data)
                 return
         except Exception as e:
             log.exception("api POST ошибка")
@@ -313,6 +350,82 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             st = {"night": {}}
         self._json({"ok": True, "night": st.get("night") or {}})
+
+    # ---------- .env: редактор кнопки ⚙️ (0.1.1.9) ----------
+
+    def _api_env_get(self):
+        """Содержимое локального .env + статус Termux-режима.
+
+        Сервер слушает только 127.0.0.1: страница доступна исключительно
+        на устройстве с ботом, там же лежит и .env — отдельная авторизация
+        не нужна (тот же уровень доверия, что у /api/cancel).
+        """
+        p = config.env_file_path()
+        try:
+            raw = p.read_text(encoding="utf-8")
+        except OSError:
+            raw = ""                      # .env ещё не создан — редактор начнёт с пустого
+        self._json({
+            "ok": True,
+            "path": p.name,
+            "raw": raw,
+            "termux": config.termux_notify_enabled(),
+            "termux_bin": termux_notify.binary_available(),
+        })
+
+    def _api_env_save(self, data):
+        """Сохранить .env: либо целиком {"raw": ...}, либо точечно {"key", "value"}.
+
+        Целиком: старый файл копится в .env.bak, новый пишется атомарно;
+        строки вида КЛЮЧ=ЗНАЧЕНИЕ, комментарии и пустые строки — как прислал.
+        После записи config.reload_from_env() применяет скалярные настройки
+        без рестарта (см. описание там — что применяется сразу, что нет).
+        """
+        p = config.env_file_path()
+        if "key" in data:
+            key = str(data.get("key", "")).strip()
+            if not _ENV_KEY_RE.match(key):
+                self._fail(400, "плохое имя ключа")
+                return
+            value = str(data.get("value", ""))
+            if len(value) > 4096:
+                self._fail(400, "значение слишком длинное")
+                return
+            if not config._update_env_keys({key: value}, str(p)):
+                self._fail(500, "не удалось записать .env")
+                return
+            config.reload_from_env()
+            self._json({"ok": True,
+                        "termux": config.termux_notify_enabled(),
+                        "termux_bin": termux_notify.binary_available()})
+            return
+        raw = data.get("raw")
+        if not isinstance(raw, str) or not raw.strip():
+            self._fail(400, "пустой .env — так файл сохранить нельзя")
+            return
+        if "=" not in raw:
+            self._fail(400, "в тексте нет строк вида КЛЮЧ=ЗНАЧЕНИЕ")
+            return
+        if len(raw) > ENV_MAX:
+            self._fail(400, "файл слишком большой (>128 КБ)")
+            return
+        raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+        backup = False
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            if p.exists():
+                shutil.copyfile(p, p.with_name(p.name + ".bak"))
+                backup = True
+            tmp = p.with_name(p.name + ".tmp")
+            tmp.write_text(raw, encoding="utf-8")
+            os.replace(tmp, p)           # атомарно: обрыв не оставит битый .env
+        except OSError as e:
+            self._fail(500, f"запись .env не удалась: {e}")
+            return
+        config.reload_from_env()
+        self._json({"ok": True, "backup": backup,
+                    "termux": config.termux_notify_enabled(),
+                    "termux_bin": termux_notify.binary_available()})
 
 
 # ---------- Запуск ----------

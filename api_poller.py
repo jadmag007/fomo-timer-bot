@@ -371,8 +371,14 @@ async def _poll_fomo_native(bot=None) -> int:
         # Сундуки аутпостов, готовые к забору (outpostClaimableCountByOutpostId):
         # это напоминание-ДЕЙСТВИЕ («забери сейчас»), а не новый таймер из игры,
         # поэтому ставим молча и в режиме вопросов тоже — без Да/Нет.
-        for up in claim_ready_timers(extract_claimable(data)):
+        claim = extract_claimable(data)
+        for up in claim_ready_timers(claim):
             added += maybe_add(up)
+        # Забранные сундуки (исчезли из ответа игры) — снять их карточки со страницы
+        try:
+            sync_claim_sticky(claim)
+        except Exception:
+            log.exception("sync_claim_sticky ошибка")
         _quiet_account(found, bot)  # тихий режим: 3 опроса без изменений = спим
         if trace_mod.enabled():
             trace_mod.log_response("native", 200, data, found=found, added=added)
@@ -390,6 +396,12 @@ async def _poll_fomo_native(bot=None) -> int:
                 else:
                     for up in found_all:
                         all_added += maybe_add(up)
+                # Собранные клановые сундуки/награды — снять карточки со страницы.
+                # Только после УСПЕШНОГО ответа: сбой сети карточки не трогает.
+                try:
+                    sync_all_sticky(found_all)
+                except Exception:
+                    log.exception("sync_all_sticky ошибка")
                 _STATE.update(last_all_status=200, last_all_error="",
                               last_all_found=len(found_all), last_all_added=all_added)
                 log.info("FOMO /user/data/all: наград в ответе %s, из них новых: %s",
@@ -717,6 +729,61 @@ def extract_from_har(path, now=None):
 _OWNER_WARN_TS = 0.0  # последнее предупреждение «некому ставить таймер» (анти-спам)
 _OWNER_WARN_EVERY = 600.0  # секунды между повторами предупреждения
 
+# Бакеты «ждёт забора» из /user/data/all (клановые сундуки и награды аванпостов)
+_ALL_STICKY_BUCKETS = ("stClanRewards", "stOutpostRewards")
+
+
+def sync_claim_sticky(claim):
+    """Забранные сундуки аутпостов убрать со страницы (0.1.1.8).
+
+    Липкая карточка tOutpostClaimable живёт, пока её outpostId числится в
+    outpostClaimableCountByOutpostId. Исчез из ответа — сундук забран,
+    карточку снимаем. Рост счётчика (1->2) даёт НОВЫЙ ready_key, старая
+    карточка «×1» тоже снимается — на странице остаётся актуальная.
+    """
+    u = owner()
+    if not u:
+        return 0
+    # Актуальные ключи СЕЙЧАС: рост счётчика (1->2) даёт новый ключ —
+    # старая карточка «×1» уходит, остаётся только «×2».
+    current = {"claim:%s:%s" % (oid, n) for oid, n in claim.items()}
+    removed = 0
+    for r in db.sticky_rows(u["tg_id"]):
+        if r["bucket"] != "tOutpostClaimable":
+            continue
+        rk = r["ready_key"] or ""
+        if rk.startswith("claim:") and rk not in current:
+            removed += 1 if db.cancel(u["tg_id"], r["id"]) else 0
+    if removed:
+        log.info("API: сундуков аутпоста забрано, карточек убрано: %s", removed)
+    return removed
+
+
+def sync_all_sticky(found_all):
+    """Собранные клановые сундуки/награды аванпостов убрать со страницы (0.1.1.8).
+
+    Запись st* висит в ответе /user/data/all, пока награда не забрана;
+    после сбора она исчезает ИЛИ переходит в перезарядку (dateEnd в будущем).
+    В обоих случаях готовый ключ ready_key больше не приходит — липкую
+    карточку снимаем (при перезарядке вместо неё появится обычный таймер).
+    Вызывается ТОЛЬКО после УСПЕШНОГО all-опроса — сбой сети карточки не трогает.
+    """
+    u = owner()
+    if not u:
+        return 0
+    matured = {up.get("ready_key") for up in (found_all or [])
+               if up.get("ready_key")}
+    removed = 0
+    for r in db.sticky_rows(u["tg_id"]):
+        if r["bucket"] not in _ALL_STICKY_BUCKETS:
+            continue
+        if (r["ready_key"] or "") not in matured:
+            removed += 1 if db.cancel(u["tg_id"], r["id"]) else 0
+    if removed:
+        log.info("API: клановых/аванпостных наград забрано, карточек убрано: %s",
+                 removed)
+    return removed
+
 
 def maybe_add(up):
     """Поставить авто-таймер с защитой от дублей. -> 1, если добавлен."""
@@ -748,7 +815,8 @@ def maybe_add(up):
             _SEEN.add(key)
             return 0
     db.add_timer(user["tg_id"], user["tg_id"], label, ends_at,
-                 bucket=up.get("bucket", ""))
+                 bucket=up.get("bucket", ""),
+                 sticky=bool(rk), ready_key=rk or "")
     _SEEN.add(key)
     _STATE["added_total"] += 1
     log.info("API: авто-таймер %r -> %s", label, ends_at)

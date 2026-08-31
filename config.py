@@ -137,6 +137,14 @@ load_dotenv(_ENV_PATH)
 # только PAT); (2) тихая ОСТАНОВКА: bot.py сам отменяет фоновые задачи и
 # дожидается их до закрытия цикла (sched_push.shutdown) — telethon-клиенты
 # закрываются штатно, userbot.session не остаётся открытой, стоп-лог чистый.
+# 0.1.1.7 — вебморда по замечаниям: (1) настройки ночного режима переехали
+# ВНИЗ страницы (были над таймерами — дико неудобно, каждый вход в
+# настройки прокручивал таймеры прочь); (2) кнопка «🎮 Игра» теперь
+# настоящая ссылка <a target=_blank> вместо button+window.open — попап-
+# блокировщики и встроенные браузеры молча гасили window.open, кнопка
+# выглядела мёртвой; (3) сортировка групп на странице: сначала ТРЕНИРОВКА
+# ВОЙСК, потом СТРОЙКА, дальше как раньше (порядок BUCKETS для пушей и
+# меню бота не тронут — сортировка только на экране).
 # 0.1.1.5 — github_push.sh: ПОБЕДА над кучей дублей в Download. Браузер
 # при повторном скачивании называет архивы «fomo-timer-bot (1).zip»,
 # «(2)»… — а скрипт искал только плоское имя fomo-timer-bot.zip и мог
@@ -148,7 +156,25 @@ load_dotenv(_ENV_PATH)
 # куча не растёт. Повторный запуск БЕЗ нового zip не падает, а просто
 # дожимает незапушенные коммиты (нужно после сетевого сбоя), и только
 # если в папке совсем нет установленного бота — просит скачать архив.
-APP_VERSION = "0.1.1.6"
+# 0.1.1.8 — сундуки на странице таймеров. «Готов к забору» (сундук аутпоста,
+# клановые сундуки, награды аванпостов) теперь ЛИПКИЙ: пуш приходит как раньше,
+# но карточка не исчезает через секунду, а остаётся на странице («🎁 Ждёт
+# забора») до тех пор, пока игра не покажет, что награда забрана (тогда
+# карточка снимается сама). Раньше мгновенные таймеры закрывались сразу после
+# пуша — и в морде их не было видно вовсе (жалоба: «уведомление приходит,
+# а таймера нет»). Напоминание в ТГ при этом не дублируется.
+# 0.1.1.9 — Termux-режим уведомлений и редактор .env на странице таймеров.
+# TERMUX_NOTIFY=true в .env: напоминания таймеров («✅ Готово», «🚩 осада»,
+# «⏳ минута», сундуки) НЕ пишутся в Telegram — вместо этого бот вызывает
+# termux-notification, и карточка появляется в шторке уведомлений Android.
+# Отложенные пуши юзербота (страховка «⏰ Готово: …» на серверах Telegram)
+# в этом режиме не создаются вовсе — в чате не копится лишнее. Тумблер
+# читается ЖИВО из .env: включается кнопкой ⚙️ на странице таймеров без
+# рестарта. Там же — редактор локального .env из браузера (сохранение с
+# бэкапом .env.bak; большинство настроек применяется сразу, reload_from_env).
+# Требуется приложение Termux:API (F-Droid) + pkg install termux-api; без них
+# бот работает как раньше, недоставленные пуши повторяются по окну ретраев.
+APP_VERSION = "0.1.1.9"
 
 # --- Основное ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -306,6 +332,92 @@ def env_get(key, default="", env_path=None) -> str:
     except Exception:
         pass
     return default
+
+
+def env_file_path() -> Path:
+    """Путь к файлу .env бота (для редактора настроек на странице таймеров)."""
+    return Path(_ENV_PATH)
+
+
+def termux_notify_enabled(env_path=None) -> bool:
+    """Termux-режим уведомлений (TERMUX_NOTIFY=true): напоминания таймеров
+    идут в шторку Android (termux-notification) вместо Telegram.
+
+    Читается ЖИВО из .env при каждом вызове — тумблер на странице таймеров
+    (кнопка ⚙️) действует без рестарта бота. По умолчанию выключен.
+    """
+    raw = env_get("TERMUX_NOTIFY", os.getenv("TERMUX_NOTIFY", "false"),
+                  env_path=env_path)
+    return raw.strip().lower() == "true"
+
+
+def reload_from_env() -> bool:
+    """Перечитать .env и обновить СКАЛЯРНЫЕ настройки в памяти процесса.
+
+    Вызывается после сохранения .env со страницы таймеров (кнопка ⚙️):
+    большинство тумблеров и порогов начинает работать без рестарта.
+    Намеренно НЕ трогает то, что связано с живыми объектами: BOT_TOKEN
+    (сессия бота уже создана), WEBAPP_PORT (порт уже занят), DB_PATH
+    (соединение открыто), USERBOT_API_* (клиент юзербота строится на лету),
+    FOMO_INIT_DATA (обновляется своим циклом). Возвращает True при успехе.
+    """
+    try:
+        load_dotenv(_ENV_PATH, override=True)
+    except Exception:
+        return False
+    g = globals()
+
+    def _s(name, dflt=""):
+        g[name] = os.getenv(name, dflt).strip()
+
+    def _b(name, dflt="false"):
+        g[name] = os.getenv(name, dflt).strip().lower() == "true"
+
+    def _i(name, dflt):
+        try:
+            g[name] = int(os.getenv(name, str(dflt)) or dflt)
+        except (TypeError, ValueError):
+            pass
+
+    def _f(name, dflt):
+        try:
+            g[name] = float(os.getenv(name, str(dflt)) or dflt)
+        except (TypeError, ValueError):
+            pass
+
+    _s("DEFAULT_TZ")
+    _s("BOT_TZ")
+    _b("API_ENABLED")
+    _s("API_STATE_URL")
+    _s("API_AUTH_HEADER")
+    _s("API_METHOD", "GET")
+    g["API_METHOD"] = (g["API_METHOD"] or "GET").upper()
+    _s("API_BODY")
+    _s("API_HEADERS_JSON")
+    _i("API_POLL_INTERVAL", 300)
+    _f("POLL_JITTER", 0.4)
+    _i("POLL_PULSE_MIN", 1800)
+    _i("POLL_PULSE_MAX", 3300)
+    _s("NIGHT_START", "00:00")
+    _s("NIGHT_END", "08:00")
+    _b("NIGHT_SILENT", "true")
+    _b("NIGHT_MICROTICKS")
+    _i("NIGHT_WAKE_JITTER", 900)
+    _i("WAKE_DELAY_MIN", 180)
+    _i("WAKE_DELAY_MAX", 480)
+    _i("OWNER_BUSY_WINDOW", 180)
+    _i("REAUTH_COOLDOWN", 600)
+    _i("CONTROL_POLL_MIN", 30)
+    _i("CONTROL_POLL_MAX", 120)
+    _i("FOMO_ALL_INTERVAL", 300)
+    _i("SIEGE_PREWARN_SEC", 3600)
+    _b("WARN_ENABLED")
+    _b("API_ASK_BEFORE_ADD")
+    _b("API_TRACE")
+    _i("API_OWNER_TG_ID", 0)
+    _b("USERBOT_SCHEDULE")
+    _b("WEBAPP_ENABLED")
+    return True
 
 
 def _update_env_keys(updates: dict, env_path=".env") -> bool:
