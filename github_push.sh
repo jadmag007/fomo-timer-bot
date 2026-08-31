@@ -239,7 +239,14 @@ fi
 # --- 9) commit ---------------------------------------------------------------
 # junk that must never live in git (old runs could have tracked it)
 git rm -r --cached --ignore-unmatch --quiet "*.part" "fomo-timer-bot.zip" "github_push.sh.new" >/dev/null 2>&1
-git add -A
+# cp -a keeps the payload's OLD timestamps; a new release can land with the
+# SAME (mtime, size, inode) the index cached for the previous one (it changes
+# only same-length bytes: 0.1.1.6 -> 0.1.1.7) -- and then git's stat cache
+# calls the file "unchanged" and the release commit silently skips it (the
+# E2E caught exactly this). Re-hash honestly: drop the cached list and re-add
+# from the worktree, so every tracked file is compared by CONTENT, not stat.
+git rm -r --cached --quiet . >/dev/null 2>&1 || :
+git add -A || { echo "[push] git add failed"; exit 1; }
 if git diff --cached --quiet; then
   AHEAD="$(git rev-list --count '@{upstream}..HEAD' 2>/dev/null || echo 0)"
   if [ "${AHEAD:-0}" -gt 0 ] 2>/dev/null; then

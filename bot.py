@@ -17,6 +17,7 @@ import config
 import db
 import handlers
 import pause_state
+import sched_push
 import timers
 import watcher
 import webapp_server
@@ -59,6 +60,26 @@ def start_webapp(bot: Bot, loop: asyncio.AbstractEventLoop):
         loop=loop,
         refresh_submit=lambda: asyncio.run_coroutine_threadsafe(
             api_poller.poll_once(bot), loop))
+
+
+async def _stop_background():
+    """Тихая остановка: отменить фоновые задачи и ДОЖДАТЬСЯ их до закрытия
+    цикла. Сначала задачи отложенных пушей (их telethon-клиенты закрываются
+    в собственном finally — сессия userbot.session остаётся консистентной),
+    затем планировщик/автотрекинг/watcher. Без этого asyncio добивал задачи
+    на полпути при выключении бота: в лог сыпались «Task was destroyed but
+    it is pending!», «coroutine ignored GeneratorExit» и sqlite «Cannot
+    operate on a closed database» — работа бота это не ломало, но шум
+    выглядел как авария. Теперь стоп-лог чистый."""
+    n_sched = await sched_push.shutdown()
+    ours = [t for t in _TASKS if not t.done()]
+    for t in ours:
+        t.cancel()
+    if ours:
+        await asyncio.gather(*ours, return_exceptions=True)
+    if n_sched or ours:
+        log.info("Останов: фоновые задачи сняты и закрыты (отложенные пуши: %d, бот: %d)",
+                 n_sched, len(ours))
 
 
 async def main():
@@ -122,7 +143,14 @@ async def main():
     if pause_state.is_paused():
         log.warning("Бот запущен НА ПАУЗЕ (data/pause.json) — пуши не отправляются, "
                     "снять: кнопка «Продолжить» в меню или /пауза")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        # Тихая остановка: отменяем фоновые задачи САМИ и дожидаемся их ДО
+        # закрытия цикла. Если отдать это asyncio «на добивание», задачи
+        # умирают на полпути — именно так в лог попадали пачки «Task was
+        # destroyed but it is pending!» из telethon.
+        await _stop_background()
 
 
 if __name__ == "__main__":

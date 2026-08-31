@@ -121,7 +121,13 @@ if exist "config.py" for /f "tokens=2 delims== " %%v in ('findstr /b /c:"APP_VER
 if defined VER set "VER=%VER:"=%"
 
 rem ---------- 7. stage and commit ----------
+rem install keeps previous timestamps; a same-length change (version
+rem bump) can keep the same (mtime, size) the index cached -- git's
+rem stat cache would call the file 'unchanged' and silently skip the
+rem release. Re-add by CONTENT, not stat.
+git rm -r --cached --quiet . >nul 2>nul
 git add -A
+if errorlevel 1 goto :fail
 git diff --cached --quiet
 if not errorlevel 1 (
     echo No new changes to commit. Checking GitHub anyway...

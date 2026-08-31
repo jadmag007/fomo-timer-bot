@@ -67,6 +67,66 @@ def available() -> bool:
     return os.path.exists(session_path())
 
 
+# --- фоновые задачи: сильные ссылки (0.1.1.6) -------------------------------
+# asyncio держит задачи только СЛАБО: задача без внешней ссылки может быть
+# собрана GC на лету. Симптомы в логе старта: «Task was destroyed but it is
+# pending», «coroutine ignored GeneratorExit», в придачу sqlite «Cannot
+# operate on a closed database» — у одного из запусков GC убил 5 из 6 задач
+# отложенных пушей прямо во время connect() к Telegram, и пуши потерялись.
+_TASKS: set = set()
+
+
+def _track(t: asyncio.Task) -> None:
+    _TASKS.add(t)
+    t.add_done_callback(_TASKS.discard)
+
+
+def spawn(coro) -> "asyncio.Task | None":
+    """Фоновая задача с СИЛЬНОЙ ссылкой (GC не может её убить на лету).
+    Нет живого цикла событий (sync-код, тесты) — корутина не запускается,
+    возвращается None (поведение прежнего kick_schedule)."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+    t = loop.create_task(coro)
+    _track(t)
+    return t
+
+
+async def shutdown() -> int:
+    """Тихая остановка: отменить незавершённые задачи отложенных пушей и
+    ДОЖДАТЬСЯ их. telethon-клиенты закрываются в finally у _with_client —
+    к моменту закрытия цикла не остаётся ни одного живого клиента поверх
+    userbot.session, поэтому в логе остановки нет ни «Task was destroyed
+    but it is pending!», ни «coroutine ignored GeneratorExit», ни sqlite
+    «Cannot operate on a closed database». Вызывается из bot.py."""
+    tasks = [t for t in list(_TASKS) if not t.done()]
+    for t in tasks:
+        t.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    return len(tasks)
+
+
+def _session_lock() -> asyncio.Lock:
+    """Замок НА ЦИКЛ: не открывать юзербот-сессию параллельно. Каждый
+    kick_schedule открывал СВОЙ telethon-клиент поверх ОДНОГО файла
+    userbot.session — шесть одновременных подключений и шесть читателей
+    одного sqlite: блокировки, гонки, шум при закрытии. Теперь клиенты
+    работают по очереди. Замок живёт прямо на объекте цикла, поэтому
+    тесты со своими asyncio.run() друг другу не мешают."""
+    loop = asyncio.get_running_loop()
+    lk = getattr(loop, "_fomo_sched_lock", None)
+    if lk is None:
+        lk = asyncio.Lock()
+        try:
+            loop._fomo_sched_lock = lk
+        except Exception:
+            pass
+    return lk
+
+
 async def _with_client(fn):
     """Открыть юзербота, выполнить fn(client, peer), закрыть. None при неудаче."""
     peer = peer_name()
@@ -82,18 +142,20 @@ async def _with_client(fn):
         client = TelegramClient(spath, api_id, api_hash,
                                 device_model="FomoTimerBot", system_version="Windows",
                                 app_version="1.0")
-        try:
-            await client.connect()
-            if not await client.is_user_authorized():
-                log.warning("Сессия юзербота не авторизована — отложенный пуш недоступен")
-                return None
-            entity = await client.get_entity(peer)
-            return await fn(client, entity)
-        finally:
+        async with _session_lock():
             try:
-                await client.disconnect()
-            except Exception:
-                pass
+                await client.connect()
+                if not await client.is_user_authorized():
+                    log.warning("Сессия юзербота не авторизована — отложенный "
+                                "пуш недоступен")
+                    return None
+                entity = await client.get_entity(peer)
+                return await fn(client, entity)
+            finally:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
     except Exception as e:
         log.warning("Отложенный пуш: %s: %s", type(e).__name__, e)
         return None
@@ -177,10 +239,8 @@ async def reschedule_unfinished() -> int:
     return n
 
 
-def kick_schedule(label, ends_at) -> None:
-    """Запланировать в фоне (fire-and-forget). Безопасно из sync-кода и тестов:
-    нет живого цикла событий — просто ничего не делает."""
-    try:
-        asyncio.get_running_loop().create_task(schedule(label, ends_at))
-    except RuntimeError:
-        pass
+def kick_schedule(label, ends_at) -> "asyncio.Task | None":
+    """Запланировать в фоне (fire-and-forget, но задача держится под сильной
+    ссылкой — GC не убьёт её на лету). Возвращает задачу (можно дождаться в
+    тестах). Нет живого цикла событий (sync-код и тесты) — просто None."""
+    return spawn(schedule(label, ends_at))

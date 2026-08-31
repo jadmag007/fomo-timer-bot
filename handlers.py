@@ -689,7 +689,7 @@ async def cb_cancel(cb: CallbackQuery):
     ok = db.cancel(cb.from_user.id, tid)
     if ok and row:
         # снять и запланированный на серверах дубль (фон, не тормозим ответ)
-        asyncio.create_task(sched_push.cancel_for(row["label"]))
+        sched_push.spawn(sched_push.cancel_for(row["label"]))
     text, kb = render_list(cb.from_user.id)
     await edit(cb, text, kb)
     await cb.answer("🗑 Отменено" if ok else "Уже неактуально")
@@ -866,9 +866,9 @@ async def cb_pause(cb: CallbackQuery):
     snap = pause_state.set_paused(not was)
     log.info("Пауза %s (владелец)", "снята" if was else "включена")
     if was:
-        asyncio.create_task(sched_push.reschedule_unfinished())
+        sched_push.spawn(sched_push.reschedule_unfinished())
     else:
-        asyncio.create_task(sched_push.cancel_all())
+        sched_push.spawn(sched_push.cancel_all())
     await edit(cb, menu_text(), kb_main(cb.from_user.id))
     if was:
         await cb.answer("▶️ Пуши снова работают")
@@ -891,9 +891,9 @@ async def cmd_pause(message: Message):
     snap = pause_state.set_paused(not was)
     log.info("Пауза %s (команда)", "снята" if was else "включена")
     if was:
-        asyncio.create_task(sched_push.reschedule_unfinished())
+        sched_push.spawn(sched_push.reschedule_unfinished())
     else:
-        asyncio.create_task(sched_push.cancel_all())
+        sched_push.spawn(sched_push.cancel_all())
     if not was:
         await message.answer(
             "⏸ <b>Бот поставлен на паузу.</b>\n\n"
